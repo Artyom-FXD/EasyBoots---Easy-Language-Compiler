@@ -9,8 +9,19 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software, except as provided in
+   paragraph 2.
+
+2. Additional permission for the standard library:
+   For the files that constitute the standard library (including but not
+   limited to easy_runtime.c, easy_runtime.h, and any other files explicitly
+   marked as part of the standard library), the requirements of paragraph 1
+   do not apply to programs that are compiled using this Software, nor to the
+   output of such compilation. You may use, compile, link, and distribute
+   programs that incorporate the standard library without including the
+   copyright notice or this permission notice in those programs or their
+   documentation.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
