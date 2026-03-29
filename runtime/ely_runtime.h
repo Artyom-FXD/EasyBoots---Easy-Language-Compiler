@@ -2,7 +2,9 @@
 #define ely_RUNTIME_H
 
 #include <stddef.h>
-#include <collections.h>
+typedef struct arr arr;
+typedef struct dict dict;
+#include "collections.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,12 +60,12 @@ ely_str ely_bool_to_str(ely_bool b);
 
 // ------------------------ Строки ------------------------
 size_t      ely_str_len(ely_str str);
-ely_str    ely_str_dup(ely_str str);
-ely_str    ely_str_concat(ely_str a, ely_str b);
+ely_str     ely_str_dup(ely_str str);
+ely_str     ely_str_concat(ely_str a, ely_str b);
 int         ely_str_cmp(ely_str a, ely_str b);
-ely_str    ely_str_substr(ely_str str, size_t start, size_t len);
-ely_str    ely_str_trim(ely_str str);
-ely_str    ely_str_replace(ely_str str, ely_str old, ely_str new);
+ely_str     ely_str_substr(ely_str str, size_t start, size_t len);
+ely_str     ely_str_trim(ely_str str);
+ely_str     ely_str_replace(ely_str str, ely_str old, ely_str new);
 
 // ------------------------ Математика ------------------------
 ely_int    ely_abs_int(ely_int n);
@@ -83,12 +85,12 @@ ely_double ely_tan(ely_double x);
 
 // ------------------------ Случайные числа ------------------------
 void        ely_srand(ely_uint seed);
-ely_int    ely_rand(void);
-ely_double ely_rand_double(void);
+ely_int     ely_rand(void);
+ely_double  ely_rand_double(void);
 
 // ------------------------ Время ------------------------
 void        ely_sleep(ely_uint milliseconds);
-ely_more   ely_time_now(void);
+ely_more    ely_time_now(void);
 double      ely_time_diff(ely_more start, ely_more end);
 
 // ------------------------ Файлы ------------------------
@@ -121,21 +123,16 @@ char* ely_call_str_void(void* func);
 void* ely_alloc(size_t size);
 void  ely_free(void* ptr);
 
-// ------------------------ JSON для сложных типов ------------------------
-ely_str ely_dict_to_json(ely_dict* dict);
-ely_str ely_array_to_json(ely_array* arr);
-ely_str ely_jsonify(ely_dict* dict);
-ely_dict* ely_dictify(ely_str json);
-ely_str ely_value_to_json(ely_value* v);          // убран const
-ely_value* ely_value_from_json(char* json, size_t* pos); // убран const
+// ------------------------ ely_value (forward declaration) ------------------------
+typedef struct ely_value ely_value;   // обязательно до первого использования
+char* ely_value_to_json(ely_value* v);
+ely_value* ely_value_from_json(char* json, size_t* pos);
 
-// ------------------------ Методы массивов ------------------------
-void* ely_array_pop_value(ely_array* arr);
-size_t ely_array_len(ely_array* arr);
-int ely_array_remove_value(ely_array* arr, void* value);
-int ely_array_remove_index(ely_array* arr, size_t index);
-int ely_array_insert(ely_array* arr, size_t index, void* elem);
-int ely_array_index(ely_array* arr, void* value);
+// ------------------------ JSON для сложных типов (адаптировано под arr/dict) ------------------------
+char* ely_dict_to_json(dict* d);
+char* ely_array_to_json(arr* a);
+char* ely_jsonify(dict* d);
+dict* ely_dictify(char* json);
 
 // ------------------------ DictServer API (с void*) ------------------------
 void* load(char* path);
@@ -152,7 +149,7 @@ void setDouble(void* host, char* key, double value);
 void setObj(void* host, char* key, void* value);
 void del(void* host, char* key);
 int has(void* host, char* key);
-ely_array* keys(void* host);
+arr* keys(void* host);
 char* toJson(void* host);
 void* parse(char* json);
 void freeDict(void* host);

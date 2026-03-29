@@ -117,7 +117,9 @@ def project_command(args):
     # manager.json
     manager = {
         "name": args.name,
-        "modules": {},
+        "modules": {
+            "DictServer": "./modules/DictServer/DictServer.e"
+        },
         "enter": "main.e",
         "output": {"enter": {"name": f"{args.name}.exe", "type": "exe"}}
     }
