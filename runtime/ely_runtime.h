@@ -207,6 +207,11 @@ int has(ely_value* dict, char* key);
 ely_value* keys(ely_value* dict);
 char* toJson(ely_value* dict);
 
+// other
+ely_bool isType(ely_value* value, const char* type_name);
+ely_bool isNull(ely_value* value);
+
+
 #ifdef __cplusplus
 }
 #endif

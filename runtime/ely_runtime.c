@@ -1171,3 +1171,52 @@ char* ely_array_to_json(ely_value* arr) {
     if (!arr || arr->type != ely_VALUE_ARRAY) return ely_str_dup("null");
     return array_to_json(arr->u.array_val);
 }
+
+// ------------------ OTHER --------------------
+ely_bool isType(ely_value* value, const char* type_name) {
+    if (value == NULL || type_name == NULL) {
+        return 0;
+    }
+
+    // Сначала проверяем базовые типы
+    if (strcmp(type_name, "null") == 0) {
+        return value->type == ely_VALUE_NULL;
+    }
+    else if (strcmp(type_name, "bool") == 0) {
+        return value->type == ely_VALUE_BOOL;
+    }
+    else if (strcmp(type_name, "int") == 0) {
+        return value->type == ely_VALUE_INT;
+    }
+    else if (strcmp(type_name, "double") == 0) {
+        return value->type == ely_VALUE_DOUBLE;
+    }
+    else if (strcmp(type_name, "number") == 0) {
+        return value->type == ely_VALUE_INT || value->type == ely_VALUE_DOUBLE;
+    }
+    else if (strcmp(type_name, "string") == 0) {
+        return value->type == ely_VALUE_STRING;
+    }
+    else if (strcmp(type_name, "array") == 0) {
+        return value->type == ely_VALUE_ARRAY;
+    }
+    else if (strcmp(type_name, "object") == 0) {
+        return value->type == ely_VALUE_OBJECT;
+    }
+
+    // Теперь проверяем, является ли это объектом и есть ли у него __class
+    if (value->type == ely_VALUE_OBJECT) {
+        ely_value* class_val = ely_dict_get(value, ely_value_new_string("__class"));
+        if (class_val && class_val->type == ely_VALUE_STRING) {
+            return strcmp(class_val->u.string_val, type_name) == 0;
+        }
+        // Освобождаем временное значение
+        ely_value_free(class_val);
+    }
+
+    return 0;
+}
+
+ely_bool isNull(ely_value* value) {
+    return value->type == ely_VALUE_NULL;
+}
