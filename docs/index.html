@@ -429,10 +429,7 @@
     <!-- О языке (краткие карточки) -->
     <h1 id="about" class="section-title">О языке ely</h1>
     <div class="grid-2col">
-        <div class="card">
-            <h3>Статическая типизация</h3>
-            <p>Безопасность типов на этапе компиляции. Вывод типов через <code>var</code>. Никаких неожиданных ошибок во время выполнения.</p>
-        </div>
+
         <div class="card">
             <h3>Молниеносная компиляция</h3>
             <p>Благодаря Tiny C Compiler (TCC) компиляция происходит со скоростью сотни тысяч строк в секунду. Идеально для быстрого цикла разработки.</p>
@@ -457,10 +454,6 @@
             <h3>Модульность</h3>
             <p>Сборка проектов через <code>manager.json</code>. Модули компилируются в динамические библиотеки (<code>.dll</code>/<code>.so</code>) и могут переиспользоваться.</p>
         </div>
-        <div class="card">
-            <h3>Будущий сборщик мусора</h3>
-            <p>В следующем релизе — автоматическое управление памятью для строк, массивов, словарей и объектов. Забудьте о ручном <code>free</code>.</p>
-        </div>
     </div>
 
     <!-- Синтаксис и примеры -->
@@ -477,6 +470,7 @@ public func main() -> int {
         <li><div class="prj-container"><div class="prj-image">EBT</div><h3 class="prj-name">elyBoots</h3><p class="prj-desc">Компилятор, сборка проектов, поддержка модулей.</p></div></li>
         <li><div class="prj-container"><div class="prj-image">DOC</div><h3 class="prj-name">Документация</h3><p class="prj-desc">Полное руководство, справочник API, примеры.</p></div></li>
         <li><div class="prj-container"><div class="prj-image">TCC</div><h3 class="prj-name">TCC</h3><p class="prj-desc">Компилятор для трансляции из промежуточного представления</p></div></li>
+        <li><div class="prj-container"><div class="prj-image">GCC</div><h3 class="prj-name">GCC</h3><p class="prj-desc">Простота в подключении GCC для лучшей, пусть и куда более медленной компиляции.</p></div></li>
         <li><div class="prj-container"><div class="prj-image">STD</div><h3 class="prj-name">Стандартная библиотека</h3><p class="prj-desc">Исходный код runtime, документация по функциям.</p></div></li>
         <li><div class="prj-container"><div class="prj-image">GIT</div><h3 class="prj-name">GitHub</h3><p class="prj-desc">Исходный код, issues, pull requests, гайды. Не входит в состав, но напрямую относится.</p></div></li>
     </ul>
