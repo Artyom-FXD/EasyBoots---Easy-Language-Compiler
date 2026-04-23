@@ -32,6 +32,14 @@ class ProjectBuilder:
         self.output_dir = self.project_root / 'output'
         self.compiler_runtime = self._get_runtime_path()
 
+    def _show_semantic_errors(self, errors):
+        RED = '\033[91m'
+        BOLD = '\033[1m'
+        RESET = '\033[0m'
+        print(f"{BOLD}{RED}Semantic errors:{RESET}", file=sys.stderr)
+        for e in errors:
+            sys.stderr.write(f"  {e}\n")
+
     def _get_runtime_path(self):
         if getattr(sys, 'frozen', False):
             return Path(sys.executable).parent / 'runtime'
@@ -203,7 +211,6 @@ class ProjectBuilder:
             parser = Parser(lexer)
             prog = parser.parse()
             if parser.errors:
-                print(f"Parse errors in {src}: {parser.errors}")
                 return False
             all_statements.extend(prog.statements)
             for stmt in prog.statements:
@@ -214,7 +221,7 @@ class ProjectBuilder:
         sem = SemanticAnalyzer()
         errors = sem.analyze(program)
         if errors:
-            print(f"Semantic errors in module {module_name}: {errors}")
+            self._show_semantic_errors(errors)
             return False
 
         codegen = CCodeGen(debug=self.debug, is_module=True)
@@ -322,7 +329,6 @@ class ProjectBuilder:
             parser = Parser(lexer)
             prog = parser.parse()
             if parser.errors:
-                print(f"Parse errors in {src}: {parser.errors}")
                 return False
             all_statements.extend(prog.statements)
 
@@ -330,11 +336,9 @@ class ProjectBuilder:
         sem = SemanticAnalyzer()
         errors = sem.analyze(program)
         if errors:
-            print("Semantic errors:")
-            for err in errors:
-                print(f"  {err}")
+            self._show_semantic_errors(errors)
             return False
-        print("✓ Semantic analysis successful")
+        print("✓ Analysis successful")
 
         codegen = CCodeGen(debug=self.debug)
         c_code = codegen.generate(program)

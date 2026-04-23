@@ -37,6 +37,21 @@ class CCodeGen:
         self.var_types = {}
         self.scope_roots.append([])
 
+    def _ensure_identifier(self, name: str, line: int, col: int):
+        if name in self.var_types:
+            return
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return
+        if name in self.global_types:
+            return
+
+        self.emit_to_main(f"ely_value* {name} = ely_value_new_null();")
+        self.emit_to_main(f"gc_add_root((void**)&{name});")
+        self.var_types[name] = 'any'
+        if self.scope_roots:
+            self.scope_roots[-1].append(name)
+
     def _pop_scope(self):
         if self.scopes:
             self.var_types = self.scopes.pop()
@@ -784,6 +799,7 @@ class CCodeGen:
         return "ely_value_new_null()"
 
     def _gen_identifier(self, node: Identifier) -> str:
+        self._ensure_identifier(node.name, node.line, node.col)
         return node.name
 
     def _gen_binary_op(self, node: BinaryOp) -> str:
@@ -848,15 +864,23 @@ class CCodeGen:
         target_ely_type = None
         if isinstance(node.target, Identifier):
             name = node.target.name
+            found = False
             if name in self.var_types:
-                target_ely_type = self._resolve_type_alias(self.var_types[name])
+                found = True
             else:
                 for scope in reversed(self.scopes):
                     if name in scope:
-                        target_ely_type = self._resolve_type_alias(scope[name])
+                        found = True
                         break
-                if target_ely_type is None and name in self.global_types:
-                    target_ely_type = self._resolve_type_alias(self.global_types[name])
+            if name in self.global_types:
+                found = True
+
+            if not found:
+                self.var_types[name] = 'any'
+                self.emit_to_main(f"ely_value* {name};")
+                self.emit_to_main(f"gc_add_root((void**)&{name});")
+                if self.scope_roots and name and name not in ['None', 'NULL']:
+                    self.scope_roots[-1].append(name)
 
         if target_ely_type and target_ely_type not in ('any', 'void', 'arr', 'dict', '*'):
             source_type = self._get_expression_type(node.value)

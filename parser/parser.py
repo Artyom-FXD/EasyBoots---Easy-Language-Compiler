@@ -7,9 +7,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from lexer_module import Lexer, Token, TokenType
 from parser import *
 
+import sys
+
 class Parser:
+    # ANSI-цвета
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    CYAN = '\033[96m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+
     def __init__(self, lexer: Lexer):
+        self.lexer = lexer
         self.tokens: List[Token] = lexer.tokenize()
+        self.source = lexer.source          # сохраняем исходный код
+        self.source_lines = self.source.splitlines()
         self.pos = 0
         self.current_token: Optional[Token] = self.tokens[0] if self.tokens else None
         self.errors: List[str] = []
@@ -44,15 +56,46 @@ class Parser:
         self._error(message)
         return None
 
+    # def _error(self, message: str): # was in 26.4 214
+    #     line = self.current_token.line if self.current_token else -1
+    #     col = self.current_token.col if self.current_token else -1
+    #     error_msg = f"Syntax error at line {line}, column {col}: {message}"
+    #     self.errors.append(error_msg)
+    #     while self.current_token and self.current_token.type not in (TokenType.SEMICOLON, TokenType.RBRACE, TokenType.EOF):
+    #         self._advance()
+    #     if self.current_token and self.current_token.type in (TokenType.SEMICOLON, TokenType.RBRACE):
+    #         self._advance()
+
     def _error(self, message: str):
-        line = self.current_token.line if self.current_token else -1
-        col = self.current_token.col if self.current_token else -1
-        error_msg = f"Syntax error at line {line}, column {col}: {message}"
-        self.errors.append(error_msg)
-        while self.current_token and self.current_token.type not in (TokenType.SEMICOLON, TokenType.RBRACE, TokenType.EOF):
+        if self.current_token:
+            self._error_at(self.current_token, message)
+        else:
+            self.errors.append(message)
+        skip_limit = 100
+        skipped = 0
+        while (self.current_token is not None and 
+                self.current_token.type not in (TokenType.SEMICOLON, TokenType.RBRACE, TokenType.EOF)):
             self._advance()
-        if self.current_token and self.current_token.type in (TokenType.SEMICOLON, TokenType.RBRACE):
+            skipped += 1
+            if skipped >= skip_limit:
+                break
+        
+        if self.current_token is not None and self.current_token.type in (TokenType.SEMICOLON, TokenType.RBRACE):
             self._advance()
+
+    def _error_at(self, token: Token, message: str):
+        line_no = token.line
+        col_no = token.col
+        line_text = self.source_lines[line_no - 1] if line_no <= len(self.source_lines) else ""
+
+        prefix = f"{self.BOLD}{self.RED}SyntaxError{self.RESET}: {message}\n"
+        file_info = f"  {self.BOLD}{self.CYAN}-->{self.RESET} line {line_no}, column {col_no}\n"
+        code_line = f"  {self.BOLD}{line_text}{self.RESET}\n"
+        pointer = f"  {' ' * (col_no - 1)}{self.BOLD}{self.RED}^{self.RESET}\n"
+
+        error_msg = f"{prefix}{file_info}{code_line}{pointer}"
+        sys.stderr.write(error_msg)
+        self.errors.append(f"Syntax error at line {line_no}, column {col_no}: {message}")
 
     def _is_type_token(self) -> bool:
         return (self._check(TokenType.INT) or self._check(TokenType.UINT) or
