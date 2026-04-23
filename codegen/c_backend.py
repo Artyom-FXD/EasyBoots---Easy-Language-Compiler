@@ -104,6 +104,18 @@ class CCodeGen:
                 elif obj_type.startswith('dict<'):
                     if method == 'keys':
                         return 'arr<str>'
+            elif isinstance(expr.callee, Identifier):
+                func_name = expr.callee.name
+                if func_name in self.original_functions:
+                    ret = self.original_functions[func_name].return_type
+                    if ret:
+                        return self._resolve_type_alias(ret)
+                if func_name == 'time_now':
+                    return 'more'
+                if func_name == 'time_diff':
+                    return 'double'
+                if func_name in ('print', 'println', 'sleep'):
+                    return 'void'
             return 'any'
         return 'any'
 
@@ -177,6 +189,14 @@ class CCodeGen:
         self.code.append('static jmp_buf __ex_buf;\n')
         self.code.append('static ely_value* __ex_value = NULL;\n')
 
+        for stmt in program.statements:
+            if isinstance(stmt, MethodDeclaration) and stmt.name != '_global_init':
+                self._forward_declare(stmt)
+
+        for stmt in program.statements:
+            if isinstance(stmt, StructDeclaration):
+                self._gen_struct(stmt)
+
         if not self.is_module:
             has_main = any(isinstance(s, MethodDeclaration) and s.name == 'main' for s in program.statements)
             if not has_main:
@@ -201,16 +221,6 @@ class CCodeGen:
         for stmt in program.statements:
             if isinstance(stmt, UsingDirective):
                 self.used_modules.append(stmt.module)
-
-        self.code.append('#include "ely_runtime.h"\n')
-        self.code.append('#include "ely_gc.h"\n')
-        for mod in self.used_modules:
-            self.code.append(f'#include "{mod}.h"\n')
-        self.code.append('\n')
-
-        for stmt in program.statements:
-            if isinstance(stmt, StructDeclaration):
-                self._gen_struct(stmt)
 
         for stmt in program.statements:
             if isinstance(stmt, ExternFunction):
@@ -238,14 +248,6 @@ class CCodeGen:
 
         if self.global_vars_to_init:
             self._create_global_init()
-
-        if not self.is_module:
-            has_main = any(isinstance(s, MethodDeclaration) and s.name == 'main' for s in program.statements)
-            if not has_main:
-                self.main_code.append("int main() {")
-                self.main_code.append("    if (_global_init) _global_init();")
-                self.main_code.append("    return 0;")
-                self.main_code.append("}")
 
         final_code = self.code + self.specializations + self.main_code
         return "\n".join(final_code)
@@ -363,6 +365,10 @@ class CCodeGen:
         ctype = 'ely_value*'
         if node.initializer:
             init_code = self.gen_expression(node.initializer)
+            if resolved_type not in ('any', 'void', 'arr', 'dict', '*'):
+                source_type = self._get_expression_type(node.initializer)
+                if source_type != resolved_type:
+                    init_code = self._convert_value(init_code, source_type, resolved_type)
             self.emit_to_main(f"{ctype} {node.name} = {init_code};")
         else:
             if resolved_type == 'int':
@@ -439,7 +445,7 @@ class CCodeGen:
         self.func_name = func_name
         self.current_function = func_name
         self.func_return_type = node.return_type or 'void'
-        self.hoisted_functions = []  # список для вложенных функций
+        self.hoisted_functions = []
 
         self.emit_to_main(f"{ret_type_c} {func_name}({param_str}) {{")
         self.indent += 1
@@ -451,7 +457,6 @@ class CCodeGen:
 
         self._push_scope()
 
-        # Параметры как корни
         for p in node.parameters:
             self.var_types[p.name] = p.type
             ctype = self._type_to_c(p.type)
@@ -460,7 +465,6 @@ class CCodeGen:
                 if self.scope_roots and p.name and p.name not in ['None', 'NULL']:
                     self.scope_roots[-1].append(p.name)
 
-        # Обработка тела: выносим вложенные функции
         body_stmts = self._hoist_nested_functions(node.body)
         for stmt in body_stmts:
             self.gen_statement(stmt)
@@ -472,7 +476,6 @@ class CCodeGen:
         self.func_name = None
         self.current_function = None
 
-        # Генерируем вынесенные функции сразу после текущей
         for hoisted in self.hoisted_functions:
             self._gen_function(hoisted)
 
@@ -491,6 +494,35 @@ class CCodeGen:
             return f"ely_value_new_string({expr_code})"
         else:
             return expr_code
+
+    def _convert_value(self, value_code: str, from_type: str, to_type: str) -> str:
+        if from_type == to_type or not to_type or to_type == 'any':
+            return value_code
+
+        if from_type in ('any', None):
+            if to_type == 'int':
+                return f'ely_value_new_int(ely_value_as_int({value_code}))'
+            elif to_type in ('flt', 'double'):
+                return f'ely_value_new_double(ely_value_as_double({value_code}))'
+            elif to_type == 'bool':
+                return f'ely_value_new_bool(ely_value_as_bool({value_code}))'
+            elif to_type == 'str':
+                return f'ely_value_new_string(ely_value_to_string({value_code}))'
+            # Для char, byte и т.п. можно добавить аналогично
+
+        # Числовое -> числовое
+        if self.is_numeric(from_type) and self.is_numeric(to_type):
+            if to_type == 'int':
+                return f'ely_value_new_int(ely_value_as_int({value_code}))'
+            elif to_type in ('flt', 'double'):
+                return f'ely_value_new_double(ely_value_as_double({value_code}))'
+
+        # Общий fallback: пытаемся преобразовать через строку
+        return f'ely_value_new_string(ely_value_to_string({value_code}))'
+
+    # добавим простую проверку на числовой тип (её нет в CCodeGen, придётся добавить)
+    def is_numeric(self, ely_type: str) -> bool:
+        return ely_type in ('int', 'uint', 'more', 'umore', 'flt', 'double', 'byte', 'ubyte')
 
     def _gen_if(self, node: IfStatement):
         cond = self.gen_expression(node.condition)
@@ -683,6 +715,10 @@ class CCodeGen:
             return
         if node.value:
             val = self.gen_expression(node.value)
+            expected_type = self.func_return_type if self.current_function else 'void'
+            if expected_type and expected_type != 'void':
+                source_type = self._get_expression_type(node.value)
+                val = self._convert_value(val, source_type, expected_type)
             if self.current_function == 'main':
                 self.emit_to_main(f"return ely_value_as_int({val});")
             else:
@@ -809,6 +845,24 @@ class CCodeGen:
         else:
             value_code = raw_value_code
 
+        target_ely_type = None
+        if isinstance(node.target, Identifier):
+            name = node.target.name
+            if name in self.var_types:
+                target_ely_type = self._resolve_type_alias(self.var_types[name])
+            else:
+                for scope in reversed(self.scopes):
+                    if name in scope:
+                        target_ely_type = self._resolve_type_alias(scope[name])
+                        break
+                if target_ely_type is None and name in self.global_types:
+                    target_ely_type = self._resolve_type_alias(self.global_types[name])
+
+        if target_ely_type and target_ely_type not in ('any', 'void', 'arr', 'dict', '*'):
+            source_type = self._get_expression_type(node.value)
+            if source_type != target_ely_type:
+                value_code = self._convert_value(value_code, source_type, target_ely_type)
+
         if isinstance(node.target, MemberAccess):
             obj = self.gen_expression(node.target.object)
             self.emit_to_main(f"gc_write_barrier({obj}, (void**)&({obj}->{node.target.member}), {value_code});")
@@ -912,11 +966,6 @@ class CCodeGen:
         return f"ely_value_get_key({obj}, \"{node.member}\")"
 
     def _gen_call(self, node: Call) -> str:
-        def as_int(expr_code):
-            return f"(({expr_code}) ? ({expr_code})->u.int_val : 0)"
-        def as_double(expr_code):
-            return f"(({expr_code}) ? ({expr_code})->u.double_val : 0.0)"
-        
         if isinstance(node.callee, MemberAccess):
             obj = node.callee.object
             method = node.callee.member
@@ -926,16 +975,14 @@ class CCodeGen:
             if obj_type.startswith('arr<'):
                 if method == 'push':
                     if len(node.arguments) != 1:
-                        self.error("push expects one argument", node)
+                        self.error("push expects 1 argument", node)
                         return ""
-                    arg_code = self.gen_expression(node.arguments[0])
-                    return f"ely_array_push({obj_code}, {arg_code})"
+                    return f"ely_array_push({obj_code}, {self.gen_expression(node.arguments[0])})"
                 elif method == 'pop':
                     if len(node.arguments) == 0:
                         return f"ely_array_pop({obj_code})"
                     elif len(node.arguments) == 1:
-                        index_code = self.gen_expression(node.arguments[0])
-                        return f"ely_array_remove_index({obj_code}, {index_code})"
+                        return f"ely_array_remove_index({obj_code}, {self.gen_expression(node.arguments[0])})"
                     else:
                         self.error("pop expects 0 or 1 argument", node)
                         return ""
@@ -943,23 +990,21 @@ class CCodeGen:
                     return f"ely_value_new_int(ely_array_len({obj_code}))"
                 elif method == 'insert':
                     if len(node.arguments) != 2:
-                        self.error("insert expects two arguments (index, value)", node)
+                        self.error("insert expects 2 arguments (index, value)", node)
                         return ""
-                    index_code = self.gen_expression(node.arguments[0])
-                    value_code = self.gen_expression(node.arguments[1])
-                    return f"ely_array_insert({obj_code}, {index_code}, {value_code})"
+                    idx = self.gen_expression(node.arguments[0])
+                    val = self.gen_expression(node.arguments[1])
+                    return f"ely_array_insert({obj_code}, {idx}, {val})"
                 elif method == 'remove':
                     if len(node.arguments) != 1:
-                        self.error("remove expects one argument (value)", node)
+                        self.error("remove expects 1 argument (value)", node)
                         return ""
-                    arg_code = self.gen_expression(node.arguments[0])
-                    return f"ely_array_remove_value({obj_code}, {arg_code})"
+                    return f"ely_array_remove_value({obj_code}, {self.gen_expression(node.arguments[0])})"
                 elif method == 'index':
                     if len(node.arguments) != 1:
-                        self.error("index expects one argument (value)", node)
+                        self.error("index expects 1 argument (value)", node)
                         return ""
-                    arg_code = self.gen_expression(node.arguments[0])
-                    return f"ely_array_index({obj_code}, {arg_code})"
+                    return f"ely_array_index({obj_code}, {self.gen_expression(node.arguments[0])})"
                 else:
                     self.error(f"Unsupported array method '{method}'", node)
                     return ""
@@ -969,16 +1014,14 @@ class CCodeGen:
                     return f"ely_dict_keys({obj_code})"
                 elif method == 'del':
                     if len(node.arguments) != 1:
-                        self.error("del expects one argument (key)", node)
+                        self.error("del expects 1 argument (key)", node)
                         return ""
-                    key_code = self.gen_expression(node.arguments[0])
-                    return f"ely_dict_del({obj_code}, {key_code})"
+                    return f"ely_dict_del({obj_code}, {self.gen_expression(node.arguments[0])})"
                 elif method == 'has':
                     if len(node.arguments) != 1:
-                        self.error("has expects one argument (key)", node)
+                        self.error("has expects 1 argument (key)", node)
                         return ""
-                    key_code = self.gen_expression(node.arguments[0])
-                    return f"ely_dict_has({obj_code}, {key_code})"
+                    return f"ely_dict_has({obj_code}, {self.gen_expression(node.arguments[0])})"
                 elif method == 'toJson':
                     return f"ely_dict_to_json({obj_code})"
                 else:
@@ -990,26 +1033,26 @@ class CCodeGen:
                     return f"ely_value_new_int(ely_str_len(({obj_code})->u.string_val))"
                 elif method == 'concat':
                     if len(node.arguments) != 1:
-                        self.error("concat expects one argument", node)
+                        self.error("concat expects 1 argument", node)
                         return ""
-                    arg_code = self.gen_expression(node.arguments[0])
-                    return f"ely_value_new_string(ely_str_concat(({obj_code})->u.string_val, ({arg_code})->u.string_val))"
+                    arg = self.gen_expression(node.arguments[0])
+                    return f"ely_value_new_string(ely_str_concat(({obj_code})->u.string_val, ({arg})->u.string_val))"
                 elif method == 'substr':
                     if len(node.arguments) != 2:
-                        self.error("substr expects two arguments", node)
+                        self.error("substr expects 2 arguments", node)
                         return ""
-                    start_code = self.gen_expression(node.arguments[0])
-                    len_code = self.gen_expression(node.arguments[1])
-                    return f"ely_value_new_string(ely_str_substr(({obj_code})->u.string_val, ely_value_as_int({start_code}), ely_value_as_int({len_code})))"
+                    s = self.gen_expression(node.arguments[0])
+                    l = self.gen_expression(node.arguments[1])
+                    return f"ely_value_new_string(ely_str_substr(({obj_code})->u.string_val, ely_value_as_int({s}), ely_value_as_int({l})))"
                 elif method == 'trim':
                     return f"ely_value_new_string(ely_str_trim(({obj_code})->u.string_val))"
                 elif method == 'replace':
                     if len(node.arguments) != 2:
-                        self.error("replace expects two arguments", node)
+                        self.error("replace expects 2 arguments", node)
                         return ""
-                    old_code = self.gen_expression(node.arguments[0])
-                    new_code = self.gen_expression(node.arguments[1])
-                    return f"ely_value_new_string(ely_str_replace(({obj_code})->u.string_val, ({old_code})->u.string_val, ({new_code})->u.string_val))"
+                    old = self.gen_expression(node.arguments[0])
+                    new = self.gen_expression(node.arguments[1])
+                    return f"ely_value_new_string(ely_str_replace(({obj_code})->u.string_val, ({old})->u.string_val, ({new})->u.string_val))"
                 else:
                     self.error(f"Unsupported string method '{method}'", node)
                     return ""
@@ -1043,33 +1086,77 @@ class CCodeGen:
 
         if func_name in self.original_functions:
             func_node = self.original_functions[func_name]
+            if not func_node.type_params:
+                new_args = []
+                for i, arg_expr in enumerate(node.arguments):
+                    arg_code = args[i]
+                    if i < len(func_node.parameters):
+                        expected = func_node.parameters[i].type
+                        given = self._get_expression_type(arg_expr)
+                        arg_code = self._convert_value(arg_code, given, expected)
+                    new_args.append(arg_code)
+                args = new_args
+
+        if func_name in self.original_functions:
+            func_node = self.original_functions[func_name]
             if func_node.type_params:
-                concrete_types = {}
+                bindings = {}
                 for arg, param in zip(node.arguments, func_node.parameters):
                     arg_type = self._get_expression_type(arg)
                     if param.type in func_node.type_params:
-                        concrete_types[param.type] = arg_type
-                missing = [tp for tp in func_node.type_params if tp not in concrete_types]
+                        bindings[param.type] = arg_type
+                missing = [tp for tp in func_node.type_params if tp not in bindings]
                 if missing:
                     self.error(f"Could not infer type parameters: {missing}", node)
                     return ""
-                key = (func_name, tuple(concrete_types.values()))
+                key = (func_name, tuple(bindings.values()))
                 if key not in self.generic_instances:
-                    spec_name = self._generate_specialization(func_node, concrete_types)
+                    spec_name = self._generate_specialization(func_node, bindings)
                     self.generic_instances[key] = spec_name
-                spec_name = self.generic_instances[key]
-                return f"{spec_name}({', '.join(args)})"
+                return f"{self.generic_instances[key]}({', '.join(args)})"
 
-        if func_name == 'print':
+        if func_name == 'print':          # новая строка (бывший println)
+            if not node.arguments:
+                return 'ely_println("")'
+            arg_code = self.gen_expression(node.arguments[0])
+            return f"ely_println(ely_value_to_string({arg_code}))"
+
+        if func_name == 'printOld':       # без новой строки (бывший print)
             if not node.arguments:
                 return 'ely_print("")'
             arg_code = self.gen_expression(node.arguments[0])
             return f"ely_print(ely_value_to_string({arg_code}))"
+
         if func_name == 'println':
             if not node.arguments:
                 return 'ely_println("")'
             arg_code = self.gen_expression(node.arguments[0])
             return f"ely_println(ely_value_to_string({arg_code}))"
+
+        if func_name == 'timeNow':
+            return 'ely_value_new_int(ely_time_now())'
+
+        if func_name == 'timeDiff':
+            if len(args) != 2:
+                self.error("timeDiff expects 2 arguments", node)
+                return ""
+            return f"ely_value_new_double(ely_time_diff(ely_value_as_int({args[0]}), ely_value_as_int({args[1]})))"
+
+        if func_name == 'sleep':
+            if len(args) != 1:
+                self.error("sleep expects 1 argument", node)
+                return ""
+            return f"(ely_sleep(ely_value_as_int({args[0]})), ely_value_new_null())"
+
+        void_funcs = ['srand', 'fileClose', 'closeLibrary', 'del']
+        if func_name in void_funcs:
+            c_func = {
+                'srand': 'ely_srand',
+                'fileClose': 'ely_file_close',
+                'closeLibrary': 'ely_close_library',
+                'del': 'ely_dict_del',
+            }[func_name]
+            return f"({c_func}({', '.join(args)}), ely_value_new_null())"
 
         stdlib = {
             'len': 'ely_str_len',
@@ -1080,7 +1167,7 @@ class CCodeGen:
             'trim': 'ely_str_trim',
             'replace': 'ely_str_replace',
             'abs': 'ely_abs_int',
-            'abs_more': 'ely_abs_more',
+            'absMore': 'ely_abs_more',
             'fabs': 'ely_fabs',
             'min': 'ely_min_int',
             'max': 'ely_max_int',
@@ -1091,71 +1178,90 @@ class CCodeGen:
             'tan': 'ely_tan',
             'rand': 'ely_rand',
             'srand': 'ely_srand',
-            'rand_double': 'ely_rand_double',
-            'sleep': 'ely_sleep',
-            'time_now': 'ely_time_now',
-            'time_diff': 'ely_time_diff',
-            'file_open': 'ely_file_open',
-            'fileOpen': 'ely_file_open',
-            'file_close': 'ely_file_close',
-            'fileClose': 'ely_file_close',
-            'file_write': 'ely_file_write',
+            'randDouble': 'ely_rand_double',
             'fileWrite': 'ely_file_write',
-            'file_read': 'ely_file_read',
             'fileRead': 'ely_file_read',
-            'file_exists': 'ely_file_exists',
             'fileExists': 'ely_file_exists',
-            'file_read_all': 'ely_file_read_all',
             'fileReadAll': 'ely_file_read_all',
-            'file_remove': 'ely_file_remove',
+            'fileRemove': 'ely_file_remove',
             'remove': 'ely_file_remove',
-            'file_rename': 'ely_file_rename',
-            'path_join': 'ely_path_join',
-            'path_basename': 'ely_path_basename',
-            'path_dirname': 'ely_path_dirname',
-            'path_is_absolute': 'ely_path_is_absolute',
-            'load_library': 'ely_load_library',
-            'get_function': 'ely_get_function',
-            'close_library': 'ely_close_library',
-            'call_int_int': 'ely_call_int_int',
-            'call_double_double': 'ely_call_double_double',
-            'call_double_double_double': 'ely_call_double_double_double',
-            'call_str_void': 'ely_call_str_void',
+            'fileRename': 'ely_file_rename',
+            'pathJoin': 'ely_path_join',
+            'pathBasename': 'ely_path_basename',
+            'pathDirname': 'ely_path_dirname',
+            'pathIsAbsolute': 'ely_path_is_absolute',
+            'loadLibrary': 'ely_load_library',
+            'getFunction': 'ely_get_function',
+            'callIntInt': 'ely_call_int_int',
+            'callDoubleDouble': 'ely_call_double_double',
+            'callDoubleDoubleDouble': 'ely_call_double_double_double',
+            'callStrVoid': 'ely_call_str_void',
             'jsonify': 'ely_dict_to_json',
             'dictify': 'ely_dictify',
             'keys': 'ely_dict_keys',
-            'del': 'ely_dict_del',
             'has': 'ely_dict_has',
+            'toJson': 'ely_value_to_string',
             'intToStr': 'ely_int_to_str',
             'strToInt': 'ely_str_to_int',
-            'toJson': 'ely_value_to_string',
         }
+
         if func_name in stdlib:
             c_func = stdlib[func_name]
             call_expr = f"{c_func}({', '.join(args)})"
+
             wrappers = {
-                'ely_int_to_str': 'ely_value_new_string',
-                'ely_str_to_int': 'ely_value_new_int',
                 'ely_str_len': 'ely_value_new_int',
+                'ely_str_concat': 'ely_value_new_string',
+                'ely_str_dup': 'ely_value_new_string',
+                'ely_str_cmp': 'ely_value_new_int',
+                'ely_str_substr': 'ely_value_new_string',
+                'ely_str_trim': 'ely_value_new_string',
+                'ely_str_replace': 'ely_value_new_string',
                 'ely_abs_int': 'ely_value_new_int',
+                'ely_abs_more': 'ely_value_new_int',
+                'ely_fabs': 'ely_value_new_double',
                 'ely_min_int': 'ely_value_new_int',
                 'ely_max_int': 'ely_value_new_int',
+                'ely_pow': 'ely_value_new_double',
+                'ely_sqrt': 'ely_value_new_double',
+                'ely_sin': 'ely_value_new_double',
+                'ely_cos': 'ely_value_new_double',
+                'ely_tan': 'ely_value_new_double',
                 'ely_rand': 'ely_value_new_int',
-                'ely_time_now': 'ely_value_new_int',
+                'ely_rand_double': 'ely_value_new_double',
+                'ely_file_write': 'ely_value_new_int',
+                'ely_file_read': 'ely_value_new_string',
+                'ely_file_exists': 'ely_value_new_bool',
+                'ely_file_read_all': 'ely_value_new_string',
+                'ely_file_remove': 'ely_value_new_int',
+                'ely_file_rename': 'ely_value_new_int',
+                'ely_path_join': 'ely_value_new_string',
+                'ely_path_basename': 'ely_value_new_string',
+                'ely_path_dirname': 'ely_value_new_string',
+                'ely_path_is_absolute': 'ely_value_new_bool',
+                'ely_call_int_int': 'ely_value_new_int',
+                'ely_call_double_double': 'ely_value_new_double',
+                'ely_call_double_double_double': 'ely_value_new_double',
+                'ely_call_str_void': 'ely_value_new_string',
+                'ely_dict_to_json': 'ely_value_new_string',
+                'ely_dictify': 'ely_value_new_object',
+                'ely_dict_keys': 'ely_value_new_array',
+                'ely_dict_has': 'ely_value_new_bool',
+                'ely_value_to_string': 'ely_value_new_string',
+                'ely_int_to_str': 'ely_value_new_string',
+                'ely_str_to_int': 'ely_value_new_int',
             }
+
             if c_func in wrappers:
                 return f"{wrappers[c_func]}({call_expr})"
             return call_expr
 
-        if func_name == 'ely_typeof' and len(args) == 1:
-            arg = self.gen_expression(node.arguments[0])
-            return f"ely_value_new_string((char*)ely_typeof({arg}))"
-        if func_name == 'ely_value_get_fields' and len(args) == 1:
-            arg = self.gen_expression(node.arguments[0])
-            return f"ely_value_get_fields({arg})"
-        if func_name == 'ely_value_get_methods' and len(args) == 1:
-            arg = self.gen_expression(node.arguments[0])
-            return f"ely_value_get_methods({arg})"
+        if func_name == 'typeof' and len(args) == 1:
+            return f"ely_value_new_string((char*)ely_typeof({args[0]}))"
+        if func_name == 'fields' and len(args) == 1:
+            return f"ely_value_get_fields({args[0]})"
+        if func_name == 'methods' and len(args) == 1:
+            return f"ely_value_get_methods({args[0]})"
 
         return f"{func_name}({', '.join(args)})"
 
@@ -1233,3 +1339,13 @@ class CCodeGen:
                 new_stmts.append(stmt)
         self.hoisted_functions.extend(hoisted)
         return new_stmts
+
+    def _forward_declare(self, node: MethodDeclaration):
+        if node.name == 'main':
+            return
+        if node.type_params:
+            return
+        ret_type_c = self._type_to_c(node.return_type or 'void', for_signature=True)
+        params = [f"{self._type_to_c(p.type, for_signature=True)} {p.name}" for p in node.parameters]
+        param_str = ", ".join(params)
+        self.code.append(f"{ret_type_c} {node.name}({param_str});")
