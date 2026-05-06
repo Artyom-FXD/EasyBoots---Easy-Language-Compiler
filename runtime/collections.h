@@ -56,14 +56,13 @@ arr* dict_keys(dict* d);
 arr* dict_values(dict* d);
 dict* dict_make(size_t count, ...);
 
-// Удобные обёртки для строковых ключей
 unsigned int dict_hash_str(ely_value* key);
 int dict_cmp_str(ely_value* a, ely_value* b);
 dict* dict_new_str(void);
-void dict_set_str(dict* d, char* key, ely_value* value);
-ely_value* dict_get_str(dict* d, char* key);
-int dict_has_str(dict* d, char* key);
-int dict_delete_str(dict* d, char* key);
-arr* dict_keys_str(dict* d);  // возвращает arr* из ely_value* (строк)
+void dict_set_str(dict* d, const char* key, ely_value* value);
+ely_value* dict_get_str(dict* d, const char* key);
+int dict_has_str(dict* d, const char* key);
+int dict_delete_str(dict* d, const char* key);
+arr* dict_keys_str(dict* d);
 
 #endif

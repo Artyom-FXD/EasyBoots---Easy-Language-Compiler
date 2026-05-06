@@ -33,6 +33,13 @@ typedef struct ely_value {
     } u;
 } ely_value;
 
+typedef struct ely_class ely_class;
+struct ely_class {
+    const char* name;
+    ely_class* parent;
+    void* vtable;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif

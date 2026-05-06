@@ -4,7 +4,6 @@ from typing import List, Dict, Optional, Any
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Импортируем всё из parser (включая новые классы)
 from parser import *
 
 class SemanticError(Exception):
@@ -130,7 +129,6 @@ class SemanticAnalyzer:
         if local:
             self.error(f"Variable '{node.name}' already declared in this scope", node)
             return
-        # Раскрываем тип через псевдонимы
         resolved_type = self.resolve_type(node.type)
         if not self.is_valid_type(resolved_type):
             self.error(f"Invalid type '{node.type}' in variable declaration", node)
@@ -147,17 +145,37 @@ class SemanticAnalyzer:
         if existing:
             self.error(f"Class '{node.name}' already declared", node)
             return
+
+        all_methods = []
+        if node.extends:
+            parent_sym = self.current_scope.lookup(node.extends)
+            if not parent_sym or parent_sym.kind != 'class':
+                self.error(f"Parent class '{node.extends}' not found or not a class", node)
+            else:
+                all_methods.extend(parent_sym.all_methods)
+        all_methods.extend(node.methods)
+        node.all_methods = all_methods
+
         class_sym = Symbol(node.name, 'class')
+        class_sym.all_methods = all_methods
+        class_sym.parent_class = node.extends
+        class_sym.fields = node.fields
         self.current_scope.declare(node.name, class_sym)
+
         previous_scope = self.current_scope
         self.current_scope = Scope(previous_scope)
         self.current_class = node.name
-        if node.extends:
-            parent = previous_scope.lookup(node.extends)
-            if not parent or parent.kind != 'class':
-                self.error(f"Parent class '{node.extends}' not found or not a class", node)
+
+        for f in node.fields:
+            resolved = self.resolve_type(f.type)
+            if not self.is_valid_type(resolved):
+                self.error(f"Invalid type '{f.type}' for field '{f.name}'", f)
+            field_sym = Symbol(f.name, 'variable', resolved)
+            self.current_scope.declare(f.name, field_sym)
+
         for method in node.methods:
             self.visit_method_declaration(method)
+
         self.current_scope = previous_scope
         self.current_class = None
 
@@ -206,7 +224,6 @@ class SemanticAnalyzer:
         if existing:
             self.error(f"Extern function '{node.name}' already declared", node)
             return
-        # Проверяем типы параметров, игнорируя вариативный параметр
         for param in node.parameters:
             if param.type == '...':
                 continue
@@ -342,19 +359,14 @@ class SemanticAnalyzer:
         previous_scope = self.current_scope
         self.current_scope = Scope(previous_scope)
 
-        # Получаем тип итерабеля
         iterable_type = self.visit_expression(node.iterable)
         if iterable_type is None:
-            # ошибка уже зарегистрирована
             self.current_scope = previous_scope
             return
 
-        # Выводим тип элемента
         if iterable_type.startswith('arr<'):
-            # arr<T> -> T
             elem_type = iterable_type[4:-1].strip()
         elif iterable_type.startswith('dict<'):
-            # dict<K,V> -> V (значение)
             inner = iterable_type[5:-1].strip()
             depth = 0
             comma_pos = -1
@@ -375,17 +387,15 @@ class SemanticAnalyzer:
             self.current_scope = previous_scope
             return
 
-        # Обрабатываем объявление элемента
         if isinstance(node.item_decl, VariableDeclaration):
             if node.item_decl.type is not None:
                 declared_type = self.resolve_type(node.item_decl.type)
                 if not self.is_type_compatible(declared_type, elem_type):
                     self.error(f"Cannot assign {elem_type} to {declared_type} in for-each", node.item_decl)
-                # Используем объявленный тип
+
                 final_type = declared_type
             else:
                 final_type = elem_type
-            # Создаём символ
             sym = Symbol(node.item_decl.name, 'variable', final_type)
             self.current_scope.declare(node.item_decl.name, sym)
         else:
@@ -487,7 +497,6 @@ class SemanticAnalyzer:
         if isinstance(node, Literal):
             return self._literal_type(node)
         elif isinstance(node, Identifier):
-            # Неявное объявление при использовании
             typ = self._ensure_declared(node.name, node)
             return typ
         elif isinstance(node, BinaryOp):
@@ -512,6 +521,23 @@ class SemanticAnalyzer:
             return self._dict_literal_type(node)
         elif isinstance(node, IndexExpression):
             return self._index_expression_type(node)
+        elif isinstance(node, SuperCall):
+            if not self.current_class:
+                self.error("super used outside class", node)
+                return None
+            parent = self.current_scope.lookup(self.current_class).parent_class
+            if not parent:
+                self.error("class has no parent", node)
+                return None
+            parent_sym = self.current_scope.lookup(parent)
+            if not parent_sym or parent_sym.kind != 'class':
+                self.error("parent class not found", node)
+                return None
+            for m in parent_sym.all_methods:
+                if m.name == node.method:
+                    return self.resolve_type(m.return_type)
+            self.error(f"Method '{node.method}' not found in parent class '{parent}'", node)
+            return None
         else:
             self.error(f"Unknown expression type: {type(node).__name__}", node)
             return None
@@ -607,7 +633,12 @@ class SemanticAnalyzer:
         value_type = self.visit_expression(node.value)
         if target_type is None or value_type is None:
             return None
-        if not self.is_type_compatible(target_type, value_type):
+        target_sym = self.current_scope.lookup(target_type)
+        value_sym = self.current_scope.lookup(value_type)
+        if target_sym and target_sym.kind == 'class' and value_sym and value_sym.kind == 'class':
+            if not self._is_subclass(value_type, target_type):
+                self.error(f"Cannot assign {value_type} to {target_type} (not a subclass)", node)
+        elif not self.is_type_compatible(target_type, value_type):
             self.error(f"Cannot assign {value_type} to {target_type}", node)
         return target_type
 
@@ -615,38 +646,25 @@ class SemanticAnalyzer:
         if isinstance(node.callee, Identifier):
             sym = self.current_scope.lookup(node.callee.name)
             if sym and sym.kind == 'function':
-                # Если у функции есть параметры типов, выводим их из аргументов
                 concrete_types = {}
                 if sym.type_params:
-                    # Простейший вывод: сопоставляем типы аргументов с параметрами
-                    # Для каждого параметра функции, если его тип — один из type_params,
-                    # связываем его с типом аргумента.
+
                     for arg, param in zip(node.arguments, sym.parameters):
                         arg_type = self.visit_expression(arg)
                         if arg_type is None:
                             continue
-                        # Раскрываем тип параметра (может быть typevar)
                         param_type = param.type
                         if param_type in sym.type_params:
-                            # связываем param_type с arg_type
                             concrete_types[param_type] = arg_type
-                        # Если в параметре есть вложенные параметры (например, arr<T>),
-                        # можно рекурсивно пройти, но для простоты пока не делаем.
-                    # Проверяем, что все параметры типов определены
                     for tp in sym.type_params:
                         if tp not in concrete_types:
                             self.error(f"Could not infer type parameter '{tp}'", node)
                             return None
-                    # Здесь нужно было бы создать экземпляр функции (мономорфизацию),
-                    # но это уже задача бэкенда. Пока просто вернём тип (его тоже надо заменить).
-                    # Для типа возврата заменим параметры на конкретные типы.
                     return_type = sym.type
                     for tp, ct in concrete_types.items():
-                        # замена в строке типа (простая)
                         return_type = return_type.replace(tp, ct)
                     return return_type
                 else:
-                    # обычная функция
                     has_variadic = hasattr(sym, 'is_variadic') and sym.is_variadic
                     min_args = len(sym.parameters) - (1 if has_variadic else 0)
                     if has_variadic:
@@ -662,9 +680,16 @@ class SemanticAnalyzer:
                         if arg_type and not self.is_type_compatible(param.type, arg_type):
                             self.error(f"Argument {i+1} of call to '{node.callee.name}' expected {param.type}, got {arg_type}", node)
                     return sym.type
-        elif isinstance(node.callee, MemberAccess):
-            # можно добавить методы обобщённых типов
-            pass
+        if isinstance(node.callee, MemberAccess):
+            obj_type = self.visit_expression(node.callee.object)
+            if obj_type is None: return None
+            sym = self.current_scope.lookup(obj_type)
+            if sym and sym.kind == 'class':
+                m = self._find_class_method(obj_type, node.callee.member)
+                if not m:
+                    self.error(f"Class '{obj_type}' has no method '{node.callee.member}'", node)
+                    return None
+                return self.resolve_type(m.return_type)
         return None
 
     def _member_access_type(self, node: MemberAccess) -> Optional[str]:
@@ -672,9 +697,7 @@ class SemanticAnalyzer:
         if obj_type is None:
             return None
         if obj_type.startswith('dict<'):
-            # Извлекаем тип значения из dict<K,V>
-            inner = obj_type[5:-1]  # dict<...>
-            # Найдём запятую вне вложенных скобок
+            inner = obj_type[5:-1]
             depth = 0
             comma_pos = -1
             for i, ch in enumerate(inner):
@@ -690,17 +713,14 @@ class SemanticAnalyzer:
                 return None
             key_type = inner[:comma_pos].strip()
             value_type = inner[comma_pos+1:].strip()
-            # Ключ при dot-доступе всегда строка. Разрешаем key_type == 'str' или 'any'.
             if key_type not in ('str', 'any'):
                 self.error(f"Dict key must be string for dot access, got {key_type}", node)
             return value_type
         else:
-            # Для структур/классов – поиск поля
             sym = self.current_scope.lookup(obj_type)
             if sym and sym.kind == 'struct':
                 for field in sym.fields:
                     if field.name == node.member:
-                        # Возвращаем тип поля
                         return self.resolve_type(field.type)
                 self.error(f"Struct '{obj_type}' has no field '{node.member}'", node)
                 return None
@@ -721,7 +741,6 @@ class SemanticAnalyzer:
         return then_type
 
     def _fstring_type(self, node: FString) -> str:
-        # Проверяем все вставки-выражения
         for part in node.parts:
             if isinstance(part, Expression):
                 self.visit_expression(part)
@@ -729,7 +748,6 @@ class SemanticAnalyzer:
 
     def _array_literal_type(self, node: ArrayLiteral) -> str:
         if not node.elements:
-            # Пустой массив – тип не определён, будем считать any
             return 'arr<any>'
         first_type = self.visit_expression(node.elements[0])
         for elem in node.elements[1:]:
@@ -743,18 +761,14 @@ class SemanticAnalyzer:
             return 'dict<any, any>'
         first_key_type = self.visit_expression(node.pairs[0].key)
         first_val_type = self.visit_expression(node.pairs[0].value)
-        # проверяем, что все ключи одного типа
         for pair in node.pairs[1:]:
             key_type = self.visit_expression(pair.key)
             if not self.is_type_compatible(first_key_type, key_type):
-                # ключи разных типов – используем any
                 first_key_type = 'any'
-        # проверяем, что все значения одного типа
         val_type = first_val_type
         for pair in node.pairs[1:]:
             val_type2 = self.visit_expression(pair.value)
             if not self.is_type_compatible(val_type, val_type2):
-                # значения разных типов – используем any
                 val_type = 'any'
         return f'dict<{first_key_type}, {val_type}>'
 
@@ -763,18 +777,13 @@ class SemanticAnalyzer:
         index_type = self.visit_expression(node.index)
         if target_type is None or index_type is None:
             return None
-        # Определяем тип элемента массива или словаря
         if target_type.startswith('arr<'):
-            # Извлекаем внутренний тип
-            inner = target_type[4:-1]  # arr<...>
+            inner = target_type[4:-1]
             if not self.is_numeric(index_type):
                 self.error(f"Array index must be numeric, got {index_type}", node)
             return inner
         elif target_type.startswith('dict<'):
-            # dict<K,V>
-            # Разбираем типы ключа и значения
-            inner = target_type[5:-1]  # dict<...>
-            # Найдём запятую вне вложенных скобок
+            inner = target_type[5:-1]
             depth = 0
             comma_pos = -1
             for i, ch in enumerate(inner):
@@ -798,19 +807,16 @@ class SemanticAnalyzer:
             return None
 
     def resolve_type(self, type_name: str) -> str:
-        # Обработка указателей
         if type_name.endswith('*'):
             inner = type_name[:-1].strip()
             resolved_inner = self.resolve_type(inner)
             return f"{resolved_inner}*"
-        # Если это параметризованный тип (arr<...>, dict<...>), раскрываем внутренние типы
         if type_name.startswith('arr<') and type_name.endswith('>'):
             inner = type_name[4:-1].strip()
             resolved_inner = self.resolve_type(inner)
             return f'arr<{resolved_inner}>'
         if type_name.startswith('dict<') and type_name.endswith('>'):
             inner = type_name[5:-1].strip()
-            # Разделяем на ключ и значение с учётом вложенности
             depth = 0
             comma_pos = -1
             for i, ch in enumerate(inner):
@@ -822,14 +828,12 @@ class SemanticAnalyzer:
                     comma_pos = i
                     break
             if comma_pos == -1:
-                # Может быть, это dict без параметров (уже обработано ранее)
                 return type_name
             key_part = inner[:comma_pos].strip()
             val_part = inner[comma_pos+1:].strip()
             resolved_key = self.resolve_type(key_part)
             resolved_val = self.resolve_type(val_part)
             return f'dict<{resolved_key}, {resolved_val}>'
-        # Простой тип
         sym = self.current_scope.lookup(type_name)
         if sym and sym.kind == 'typevar':
             return type_name
@@ -840,18 +844,14 @@ class SemanticAnalyzer:
     def is_valid_type(self, type_name: str) -> bool:
         if type_name == '...':
             return True
-        # Разбираем указатели
         if type_name.endswith('*'):
             inner = type_name[:-1].strip()
             return self.is_valid_type(inner)
-        # Проверка typevar
         sym = self.current_scope.lookup(type_name)
         if sym and sym.kind == 'typevar':
             return True
-        # Проверка примитивных типов
         if type_name in ('void', 'bool', 'int', 'uint', 'more', 'umore', 'flt', 'double', 'noised', 'str', 'char', 'byte', 'ubyte', 'any'):
             return True
-        # Проверка параметризованных типов
         if type_name.startswith('arr<') and type_name.endswith('>'):
             inner = type_name[4:-1].strip()
             return self.is_valid_type(inner)
@@ -904,12 +904,14 @@ class SemanticAnalyzer:
             return True
         if self.is_numeric(target_resolved) and self.is_numeric(source_resolved):
             return True
-        # Если target – массив, а source – массив, сравниваем внутренние типы
+        target_sym = self.current_scope.lookup(target_resolved)
+        source_sym = self.current_scope.lookup(source_resolved)
+        if target_sym and target_sym.kind == 'class' and source_sym and source_sym.kind == 'class':
+            return self._is_subclass(source_resolved, target_resolved)
         if target_resolved.startswith('arr<') and source_resolved.startswith('arr<'):
             t_inner = target_resolved[4:-1].strip()
             s_inner = source_resolved[4:-1].strip()
             return self.is_type_compatible(t_inner, s_inner)
-        # Если target – словарь, сравниваем ключ и значение
         if target_resolved.startswith('dict<') and source_resolved.startswith('dict<'):
             t_inner = target_resolved[5:-1].strip()
             s_inner = source_resolved[5:-1].strip()
@@ -921,7 +923,6 @@ class SemanticAnalyzer:
         return False
 
     def _split_dict_types(self, inner: str):
-        """Вспомогательная: разделяет строку dict<key,value> на key и value с учётом вложенности."""
         depth = 0
         comma_pos = -1
         for i, ch in enumerate(inner):
@@ -956,3 +957,26 @@ class SemanticAnalyzer:
         sym = Symbol(name, 'variable', 'any')
         self.current_scope.declare(name, sym)
         return 'any'
+
+    def _is_subclass(self, child: str, parent: str) -> bool:
+        sym = self.current_scope.lookup(child)
+        if not sym or sym.kind != 'class':
+            return False
+        cur = sym
+        while cur:
+            if cur.name == parent:
+                return True
+            if cur.parent_class:
+                cur = self.current_scope.lookup(cur.parent_class)
+            else:
+                break
+        return False
+
+    def _find_class_method(self, class_name: str, method_name: str) -> Optional[MethodDeclaration]:
+        sym = self.current_scope.lookup(class_name)
+        if not sym or sym.kind != 'class':
+            return None
+        for m in sym.all_methods:
+            if m.name == method_name:
+                return m
+        return None

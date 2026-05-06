@@ -35,10 +35,12 @@ class CCodeGen:
         self.extern_functions = {}
         self.builtin_signatures = {}
         self._init_builtins()
-        self.classes = {}
         self.current_class_name = None
         self.current_function = None
         self.classes_ast = {}
+        self.classes = {}
+        self.class_structs = {}
+        self.class_vtables = {}
         self.current_class_name = None
 
     def _init_builtins(self):
@@ -124,6 +126,7 @@ class CCodeGen:
             'typeof':  ('ely_typeof',         'str',   ['any']),
             'fields':  ('ely_value_get_fields', 'arr<str>', ['any']),
             'methods': ('ely_value_get_methods','arr<str>', ['any']),
+            'isType': ('isType', 'bool', ['any', 'str']),
         }
         for name, (c_name, ret, params) in builtins.items():
             self.builtin_signatures[name] = (c_name, ret, params)
@@ -297,6 +300,7 @@ class CCodeGen:
         self.code.append('#include <stdio.h>\n')
         self.code.append('#include <stdlib.h>\n')
         self.code.append('#include <setjmp.h>\n')
+        self.code.append('#include <stdint.h>\n')
         for mod in self.used_modules:
             self.code.append(f'#include "{mod}.h"\n')
         self.code.append('\n')
@@ -401,6 +405,9 @@ class CCodeGen:
             for method in methods:
                 self._gen_function(method)
         self.current_class_name = None
+
+        for cls in self.classes_ast.values():
+            self._gen_vtable(cls)
 
         if self.global_vars_to_init:
             self._create_global_init()
@@ -674,6 +681,8 @@ class CCodeGen:
     def _convert_value(self, value_code: str, from_type: str, to_type: str) -> str:
         if from_type == to_type or not to_type or to_type == 'any':
             return value_code
+        if from_type in self.classes_ast and to_type in self.classes_ast:
+            return value_code
 
         if from_type in ('any', None):
             if to_type == 'int':
@@ -906,6 +915,8 @@ class CCodeGen:
     def gen_expression(self, expr: Expression) -> Optional[str]:
         if isinstance(expr, Literal):
             return self._gen_literal(expr)
+        elif isinstance(expr, SuperCall):
+            return self._gen_super_call(expr)
         elif isinstance(expr, Identifier):
             return self._gen_identifier(expr)
         elif isinstance(expr, BinaryOp):
@@ -1116,13 +1127,28 @@ class CCodeGen:
             self.current_class_name = None
             super_actuals = ', '.join([self.gen_expression(arg) for arg in cls.super_args])
             self.current_class_name = old_class
-
             self.emit_to_main(f"ely_value* obj = {parent}_constructor({super_actuals});")
             self.emit_to_main("gc_add_root((void**)&obj);")
         else:
             self.emit_to_main("ely_value* obj = ely_value_new_object(dict_new_str());")
             self.emit_to_main("gc_add_root((void**)&obj);")
 
+        self.emit_to_main(f"ely_value_set_key(obj, \"__class\", ely_value_new_string(\"{name}\"));")
+        self.emit_to_main(f"ely_value_set_key(obj, \"__vtable\", ely_value_new_int((long long)&{name}_vtable_inst));")
+        if parent:
+            self.emit_to_main(f"ely_value_set_key(obj, \"__parent_class\", ely_value_new_string(\"{parent}\"));")
+
+        chain = []
+        cur = name
+        while cur:
+            chain.insert(0, cur)
+            cur_cls = self.classes_ast.get(cur)
+            cur = cur_cls.extends if cur_cls else None
+        self.emit_to_main(f"arr* __chain = arr_new();")
+        for cname in chain:
+            self.emit_to_main(f"arr_push(__chain, ely_value_new_string(\"{cname}\"));")
+        self.emit_to_main(f"ely_value_set_key(obj, \"__class_chain\", ely_value_new_array(__chain));")
+    
         for f in cls.wait_fields:
             self.emit_to_main(f"ely_value_set_key(obj, \"{f.name}\", {f.name});")
 
@@ -1314,14 +1340,13 @@ class CCodeGen:
                     return ""
 
             if obj_type in self.classes_ast:
-                c_func = f"{obj_type}_{method}"
-                args_code = [obj_code]  # self первый аргумент
+                obj_code = self._gen_expr_rooted(obj)
+                vtable_ptr = f"((struct {obj_type}_vtable*)((long long)ely_value_as_int(ely_value_get_key({obj_code}, \"__vtable\"))))"
+                args_code = [obj_code]                    # self
                 for arg in node.arguments:
-                    arg_code = self.gen_expression(arg)
-                    if arg_code is None:
-                        return "ely_value_new_null()"
-                    args_code.append(arg_code)
-                return f"{c_func}({', '.join(args_code)})"
+                    args_code.append(self._gen_expr_rooted(arg))
+                call_expr = f"{vtable_ptr}->{node.callee.member}({', '.join(args_code)})"
+                return call_expr
 
             self.error(f"Method calls not supported for type {obj_type}", node)
             return ""
@@ -1511,7 +1536,6 @@ class CCodeGen:
 
         if is_main:
             self.emit_to_main("gc_init();")
-            self.emit_to_main("gc_set_enabled(false);") #DEBUG
             if self.global_vars_to_init and not self.is_module:
                 self.emit_to_main("_global_init();")
 
@@ -1533,7 +1557,6 @@ class CCodeGen:
         for stmt in body_stmts:
             self.gen_statement(stmt)
 
-        self.emit_to_main("gc_set_enabled(true);")
         self._pop_scope()
         self.indent -= 1
         self.emit_to_main("}")
@@ -1558,3 +1581,73 @@ class CCodeGen:
 
     def _emit_drop_root(self, var_name: str):
         self.emit_to_main(f"gc_remove_root((void**)&{var_name});")
+
+    def _gen_class_struct(self, cls: ClassDeclaration):
+        name = cls.name
+        parent = cls.extends
+        fields = []
+        if parent and parent in self.classes_ast:
+            parent_cls = self.classes_ast[parent]
+            fields.append(f"struct {parent} __parent;")
+        for f in cls.fields:
+            ctype = self._type_to_c(f.type)
+            fields.append(f"{ctype} {f.name};")
+        self.emit(f"struct {name} {{")
+        for fld in fields:
+            self.emit(f"    {fld}")
+        self.emit("};")
+        self.emit(f"typedef struct {name} {name};")
+
+    def _gen_vtable(self, cls: ClassDeclaration):
+        name = cls.name
+        vname = f"{name}_vtable"
+        methods_unique = []
+        seen = set()
+        for m in reversed(cls.all_methods):
+            if m.name not in seen:
+                seen.add(m.name)
+                methods_unique.append(m)
+        methods_unique.reverse()
+        if not methods_unique:
+            return
+        self.emit(f"struct {vname} {{")
+        for m in methods_unique:
+            ret = self._type_to_c(m.return_type or 'void', for_signature=True)
+            params = ', '.join([f"{self._type_to_c(p.type, for_signature=True)}" for p in m.parameters])
+            self.emit(f"    {ret} (*{m.name})(ely_value* self{', ' if params else ''}{params});")
+        self.emit("};")
+        self.emit(f"static struct {vname} {vname}_inst = {{")
+        for m in methods_unique:
+            self.emit(f"    {name}_{m.name},")
+        self.emit("};")
+
+    def _gen_super_call(self, node: SuperCall) -> str:
+        if not self.current_class_name:
+            self.error("super used outside class method", node)
+            return "ely_value_new_null()"
+        cls = self.classes_ast.get(self.current_class_name)
+        if not cls or not cls.extends:
+            self.error("class has no parent", node)
+            return "ely_value_new_null()"
+        parent = cls.extends
+        parent_cls = self.classes_ast.get(parent)
+        if not parent_cls:
+            self.error(f"parent class {parent} not found", node)
+            return "ely_value_new_null()"
+        for m in parent_cls.all_methods:
+            if m.name == node.method:
+                args_code = [self.gen_expression(a) for a in node.arguments]
+                args_code.insert(0, 'self')
+                return f"{parent}_{m.name}({', '.join(args_code)})"
+        self.error(f"Method {node.method} not found in parent {parent}", node)
+        return "ely_value_new_null()"
+    
+    def _gen_expr_rooted(self, expr: Expression) -> str:
+        code = self.gen_expression(expr)
+        if isinstance(expr, Identifier):
+            return code
+        tmp = f"__tmp_{self.temp_counter}"
+        self.temp_counter += 1
+        self.emit_to_main(f"ely_value* {tmp} = {code};")
+        self.emit_to_main(f"gc_add_root((void**)&{tmp});")
+        return tmp

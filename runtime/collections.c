@@ -62,7 +62,6 @@ ely_value* arr_get(arr* a, size_t index) {
 
 void arr_set(arr* a, size_t index, ely_value* elem) {
     if (!a || index >= a->size) return;
-    // Старое значение освобождать не нужно, GC сам соберёт
     gc_write_barrier(a, (void**)&a->data[index], elem);
 }
 
@@ -73,7 +72,7 @@ size_t arr_len(arr* a) {
 int arr_remove_value(arr* a, ely_value* value) {
     if (!a || a->size == 0) return -1;
     for (size_t i = 0; i < a->size; i++) {
-        if (a->data[i] == value) {   // сравнение указателей, для точного сравнения нужна функция ely_value_equal
+        if (a->data[i] == value) {
             for (size_t j = i; j < a->size - 1; j++) a->data[j] = a->data[j+1];
             a->size--;
             return 0;
@@ -301,7 +300,6 @@ dict* dict_make(size_t count, ...) {
     return d;
 }
 
-// Обёртки для строковых ключей
 unsigned int dict_hash_str(ely_value* key) {
     if (!key || key->type != ely_VALUE_STRING) return 0;
     unsigned int hash = 5381;
@@ -323,28 +321,27 @@ dict* dict_new_str(void) {
     return dict_new(dict_hash_str, dict_cmp_str);
 }
 
-void dict_set_str(dict* d, char* key, ely_value* value) {
-    ely_value* key_val = ely_value_new_string(key);
+void dict_set_str(dict* d, const char* key, ely_value* value) {
+    ely_value* key_val = ely_value_new_string((char*)key);
     dict_set(d, key_val, value);
-    // key_val больше не нужен, т.к. dict_set его сохранил (мы передаём владение)
 }
 
-ely_value* dict_get_str(dict* d, char* key) {
-    ely_value* key_val = ely_value_new_string(key);
+ely_value* dict_get_str(dict* d, const char* key) {
+    ely_value* key_val = ely_value_new_string((char*)key);
     ely_value* res = dict_get(d, key_val);
     ely_value_free(key_val);
     return res;
 }
 
-int dict_has_str(dict* d, char* key) {
-    ely_value* key_val = ely_value_new_string(key);
+int dict_has_str(dict* d, const char* key) {
+    ely_value* key_val = ely_value_new_string((char*)key);
     int res = dict_has(d, key_val);
     ely_value_free(key_val);
     return res;
 }
 
-int dict_delete_str(dict* d, char* key) {
-    ely_value* key_val = ely_value_new_string(key);
+int dict_delete_str(dict* d, const char* key) {
+    ely_value* key_val = ely_value_new_string((char*)key);
     int res = dict_delete(d, key_val);
     ely_value_free(key_val);
     return res;

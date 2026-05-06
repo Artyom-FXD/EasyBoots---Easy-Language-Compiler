@@ -1155,46 +1155,32 @@ char* ely_array_to_json(ely_value* arr) {
 
 // ------------------ OTHER --------------------
 ely_bool isType(ely_value* value, const char* type_name) {
-    if (value == NULL || type_name == NULL) {
-        return 0;
-    }
+    if (value == NULL || type_name == NULL) return 0;
+    if (strcmp(type_name, "null") == 0)    return value->type == ely_VALUE_NULL;
+    if (strcmp(type_name, "bool") == 0)    return value->type == ely_VALUE_BOOL;
+    if (strcmp(type_name, "int") == 0)     return value->type == ely_VALUE_INT;
+    if (strcmp(type_name, "double") == 0)  return value->type == ely_VALUE_DOUBLE;
+    if (strcmp(type_name, "string") == 0)  return value->type == ely_VALUE_STRING;
+    if (strcmp(type_name, "array") == 0)   return value->type == ely_VALUE_ARRAY;
+    if (strcmp(type_name, "object") == 0)  return value->type == ely_VALUE_OBJECT;
 
-    // Сначала проверяем базовые типы
-    if (strcmp(type_name, "null") == 0) {
-        return value->type == ely_VALUE_NULL;
-    }
-    else if (strcmp(type_name, "bool") == 0) {
-        return value->type == ely_VALUE_BOOL;
-    }
-    else if (strcmp(type_name, "int") == 0) {
-        return value->type == ely_VALUE_INT;
-    }
-    else if (strcmp(type_name, "double") == 0) {
-        return value->type == ely_VALUE_DOUBLE;
-    }
-    else if (strcmp(type_name, "number") == 0) {
-        return value->type == ely_VALUE_INT || value->type == ely_VALUE_DOUBLE;
-    }
-    else if (strcmp(type_name, "string") == 0) {
-        return value->type == ely_VALUE_STRING;
-    }
-    else if (strcmp(type_name, "array") == 0) {
-        return value->type == ely_VALUE_ARRAY;
-    }
-    else if (strcmp(type_name, "object") == 0) {
-        return value->type == ely_VALUE_OBJECT;
-    }
-
-    // Теперь проверяем, является ли это объектом и есть ли у него __class
     if (value->type == ely_VALUE_OBJECT) {
-        ely_value* class_val = ely_dict_get(value, ely_value_new_string("__class"));
-        if (class_val && class_val->type == ely_VALUE_STRING) {
-            return strcmp(class_val->u.string_val, type_name) == 0;
+        ely_value* chain = dict_get_str(value->u.object_val, "__class_chain");
+        if (chain && chain->type == ely_VALUE_ARRAY) {
+            arr* chain_arr = chain->u.array_val;
+            for (size_t i = 0; i < arr_len(chain_arr); i++) {
+                ely_value* cls_name = arr_get(chain_arr, i);
+                if (cls_name && cls_name->type == ely_VALUE_STRING) {
+                    if (strcmp(cls_name->u.string_val, type_name) == 0)
+                        return 1;
+                }
+            }
         }
-        // Освобождаем временное значение
-        ely_value_free(class_val);
+        ely_value* cls = dict_get_str(value->u.object_val, "__class");
+        if (cls && cls->type == ely_VALUE_STRING) {
+            return strcmp(cls->u.string_val, type_name) == 0;
+        }
     }
-
     return 0;
 }
 
@@ -1210,7 +1196,7 @@ ely_bool isIn(ely_value* value, arr* in) {
     }
     return 0;
 }
-// ------------------------ Рефлексия ------------------------
+// ------------------------ Reflection ------------------------
 char* ely_typeof(ely_value* v) {
     if (!v) return "null";
     switch (v->type) {
@@ -1313,7 +1299,6 @@ ely_value* ely_invoke(void* func_ptr, ely_value** args, int argc) {
 ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_value** args, int argc) {
     if (!obj || !method_name) return ely_value_new_null();
 
-    // 1. Массивы
     if (obj->type == ely_VALUE_ARRAY) {
         arr* a = obj->u.array_val;
         if (strcmp(method_name, "push") == 0 && argc == 1) {
@@ -1351,7 +1336,6 @@ ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_va
         }
     }
 
-    // 2. Строки
     else if (obj->type == ely_VALUE_STRING) {
         char* s = obj->u.string_val;
         if (!s) return ely_value_new_null();
@@ -1380,7 +1364,6 @@ ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_va
         }
     }
 
-    // 3. Числа
     else if (obj->type == ely_VALUE_INT || obj->type == ely_VALUE_DOUBLE) {
         double num = (obj->type == ely_VALUE_INT) ? (double)obj->u.int_val : obj->u.double_val;
         if (strcmp(method_name, "toStr") == 0 && argc == 0) {
@@ -1400,18 +1383,15 @@ ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_va
             return ely_value_new_double(num);
     }
 
-    // 4. Объекты (словари)
     else if (obj->type == ely_VALUE_OBJECT) {
         dict* d = obj->u.object_val;
-        ely_value* method = dict_get_str(d, method_name);
+        ely_value* method = dict_get_str(d, (char*)method_name);
         if (method && method->type == ely_VALUE_FUNCTION) {
             if (method->u.function.is_native)
                 return ely_invoke(method->u.function.func_ptr, args, argc);
             else
-                // Ely-функция – пока заглушка
                 return ely_value_new_null();
         }
-        // Встроенные методы словаря
         if (strcmp(method_name, "keys") == 0 && argc == 0)
             return ely_dict_keys(obj);
         else if (strcmp(method_name, "values") == 0 && argc == 0)
@@ -1426,7 +1406,6 @@ ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_va
             return ely_value_new_int(dict_size(d));
     }
 
-    // 5. Функции как объекты
     else if (obj->type == ely_VALUE_FUNCTION) {
         if (obj->u.function.is_native)
             return ely_invoke(obj->u.function.func_ptr, args, argc);

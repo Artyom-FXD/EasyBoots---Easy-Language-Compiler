@@ -1246,7 +1246,6 @@ class Parser:
                 return None
             if self._consume(TokenType.RPAREN, "Expected ')' after constructor arguments") is None:
                 return None
-            # Транслируем `new Foo(x)` в вызов `Foo_constructor(x)`
             callee = Identifier(line=line, col=col, name=f"{class_name}_constructor")
             return Call(line=line, col=col, callee=callee, arguments=args)
         if self._check(TokenType.FSTRING):
@@ -1328,11 +1327,9 @@ class Parser:
             col = self.current_token.col if self.current_token else 0
             pairs = []
             if not self._check(TokenType.RBRACE):
-                # парсим первый ключ
                 key_expr = self._parse_expression()
                 if key_expr is None:
                     return None
-                # если ключ — идентификатор, превращаем в строковый литерал
                 if isinstance(key_expr, Identifier):
                     key_expr = Literal(line=key_expr.line, col=key_expr.col, value=key_expr.name)
                 if self._consume(TokenType.COLON, "Expected ':' in dict literal") is None:
@@ -1357,6 +1354,28 @@ class Parser:
             if self._consume(TokenType.RBRACE, "Expected '}' after dict literal") is None:
                 return None
             return DictLiteral(line=line, col=col, pairs=pairs)
+
+        if self._match(TokenType.SUPER):
+            line = self.current_token.line if self.current_token else 0
+            col = self.current_token.col if self.current_token else 0
+            if not self._check(TokenType.DOT):
+                self._error("Expected '.' after super")
+                return None
+            self._advance()                     # point
+            if not self._check(TokenType.IDENTIFIER):
+                self._error("Expected method name after super.")
+                return None
+            method = self.current_token.lexeme
+            self._advance()
+            if self._consume(TokenType.LPAREN, "Expected '(' after method name") is None:
+                return None
+            args = self._parse_arguments()
+            if args is None:
+                return None
+            if self._consume(TokenType.RPAREN, "Expected ')' after arguments") is None:
+                return None
+            return SuperCall(line=line, col=col, method=method, arguments=args)
+
         if self._check(TokenType.IDENTIFIER):
             name = self.current_token.lexeme
             line = self.current_token.line

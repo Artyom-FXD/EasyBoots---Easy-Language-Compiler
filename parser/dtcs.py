@@ -242,9 +242,10 @@ class ClassDeclaration(Statement):
     extends: Optional[str]
     methods: List[MethodDeclaration]
     type_params: List[str] = field(default_factory=list)
-    fields: List[VariableDeclaration] = field(default_factory=list)       # все поля
-    wait_fields: List[VariableDeclaration] = field(default_factory=list)  # только wait-поля
+    fields: List[VariableDeclaration] = field(default_factory=list)
+    wait_fields: List[VariableDeclaration] = field(default_factory=list)
     super_args: List[Expression] = field(default_factory=list)
+    all_methods: List[MethodDeclaration] = field(default_factory=list)
 
 @dataclass
 class SuperCall(Expression):
