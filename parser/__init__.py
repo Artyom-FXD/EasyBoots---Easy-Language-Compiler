@@ -52,7 +52,10 @@ from .dtcs import (
     FieldsExpression,
     MethodsExpression,
     GlobalCBlock,
-    SuperCall
+    SuperCall,
+    InterfaceDeclaration,
+    ImplDeclaration,
+    PropertyDeclaration
 )
 from .parser import Parser
 from .semantic_analyser import SemanticError, Symbol, Scope, SemanticAnalyzer
@@ -116,7 +119,10 @@ __all__ = [
     "FieldsExpression",
     "MethodsExpression",
     "GlobalCBlock",
-    "SuperCall"
+    "SuperCall",
+    "InterfaceDeclaration",
+    "ImplDeclaration",
+    "PropertyDeclaration"
 ]
 
 __version__ = "EBP-1.0.0"

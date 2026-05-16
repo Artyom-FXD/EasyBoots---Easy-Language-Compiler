@@ -350,3 +350,9 @@ int dict_delete_str(dict* d, const char* key) {
 arr* dict_keys_str(dict* d) {
     return dict_keys(d);
 }
+
+char* ely_get_class_info_name(const char* name) {
+    ely_class_info* info = ely_get_class_info(name);
+    if (info) return gc_strdup(info->name);
+    return gc_strdup("unknown");
+}

@@ -64,7 +64,7 @@ static size_t dirty_capacity = 0;
 
 static uint64_t young_collections = 0;
 static uint64_t old_collections = 0;
-static bool gc_enabled = true;
+static bool gc_enabled = false;
 static int old_threshold_percent = 75;
 
 /* ============================================================================

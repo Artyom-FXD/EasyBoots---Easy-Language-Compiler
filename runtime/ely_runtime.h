@@ -25,10 +25,9 @@ typedef struct ely_value {
         char* string_val;
         arr* array_val;
         dict* object_val;
-        // Указатель на функцию C (для встроенных) или объект с кодом (для Ely-функций)
         struct {
-            void* func_ptr;      // указатель на C-функцию
-            int is_native;       // 1 если native C, 0 если Ely-функция (пока не используется)
+            void* func_ptr;
+            int is_native;
         } function;
     } u;
 } ely_value;
@@ -39,6 +38,15 @@ struct ely_class {
     ely_class* parent;
     void* vtable;
 };
+
+typedef struct {
+    const char* name;
+    int field_count;
+    const char** field_names;
+    const char** field_types;
+} ely_class_info;
+
+ely_class_info* ely_get_class_info(const char* name);
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,7 +70,7 @@ ely_value* ely_value_new_null(void);
 ely_value* ely_value_new_bool(int b);
 ely_value* ely_value_new_int(long long i);
 ely_value* ely_value_new_double(double d);
-ely_value* ely_value_new_string(char* s);
+ely_value* ely_value_new_string(const char* s);
 ely_value* ely_value_new_array(arr* a);
 ely_value* ely_value_new_object(dict* d);
 void ely_value_free(ely_value* v);
@@ -70,11 +78,11 @@ void ely_value_free(ely_value* v);
 // Операции над ely_value
 int ely_value_as_bool(ely_value* v);
 ely_value* ely_value_index(ely_value* v, ely_value* index);
-ely_value* ely_value_get_key(ely_value* v, char* key);
-void ely_value_set_key(ely_value* v, char* key, ely_value* value);
+ely_value* ely_value_get_key(ely_value* v, const char* key);
+void ely_value_set_key(ely_value* v, const char* key, ely_value* value);
 void ely_value_set_index(ely_value* v, ely_value* index, ely_value* value);
 char* ely_value_to_json(ely_value* v);
-ely_value* ely_value_from_json(char* json, size_t* pos);
+ely_value* ely_value_from_json(const char* json, size_t* pos);
 char* ely_value_to_string(ely_value* v);
 
 ely_value* ely_value_add(ely_value* a, ely_value* b);
@@ -94,7 +102,7 @@ ely_value* ely_value_not(ely_value* a);
 ely_value* ely_value_neg(ely_value* a);
 
 // ------------------------ Консоль ------------------------
-void ely_print(ely_str str);
+void ely_print(const char* str);
 void ely_print_int(ely_int n);
 void ely_print_uint(ely_uint n);
 void ely_print_more(ely_more n);
@@ -105,18 +113,18 @@ void ely_print_bool(ely_bool b);
 void ely_print_char(ely_char c);
 void ely_print_byte(ely_byte b);
 void ely_print_ubyte(ely_ubyte b);
-void ely_println(ely_str str);
+void ely_println(const char* str);
 
 ely_str ely_input(void);
-ely_str ely_input_prompt(ely_str prompt);
+ely_str ely_input_prompt(const char* prompt);
 
 // ------------------------ Преобразования ------------------------
-ely_int    ely_str_to_int(ely_str str);
-ely_uint   ely_str_to_uint(ely_str str);
-ely_more   ely_str_to_more(ely_str str);
-ely_umore  ely_str_to_umore(ely_str str);
-ely_flt    ely_str_to_flt(ely_str str);
-ely_double ely_str_to_double(ely_str str);
+ely_int    ely_str_to_int(const char* str);
+ely_uint   ely_str_to_uint(const char* str);
+ely_more   ely_str_to_more(const char* str);
+ely_umore  ely_str_to_umore(const char* str);
+ely_flt    ely_str_to_flt(const char* str);
+ely_double ely_str_to_double(const char* str);
 
 ely_str ely_int_to_str(ely_int n);
 ely_str ely_uint_to_str(ely_uint n);
@@ -127,13 +135,13 @@ ely_str ely_double_to_str(ely_double d);
 ely_str ely_bool_to_str(ely_bool b);
 
 // ------------------------ Строки ------------------------
-size_t      ely_str_len(ely_str str);
-ely_str     ely_str_dup(ely_str str);
-ely_str     ely_str_concat(ely_str a, ely_str b);
-int         ely_str_cmp(ely_str a, ely_str b);
-ely_str     ely_str_substr(ely_str str, size_t start, size_t len);
-ely_str     ely_str_trim(ely_str str);
-ely_str     ely_str_replace(ely_str str, ely_str old, ely_str new);
+size_t      ely_str_len(const char* str);
+ely_str     ely_str_dup(const char* str);
+ely_str     ely_str_concat(const char* a, const char* b);
+int         ely_str_cmp(const char* a, const char* b);
+ely_str     ely_str_substr(const char* str, size_t start, size_t len);
+ely_str     ely_str_trim(const char* str);
+ely_str     ely_str_replace(const char* str, const char* old, const char* new_str);
 
 // ------------------------ Математика ------------------------
 ely_int    ely_abs_int(ely_int n);
@@ -163,25 +171,25 @@ double      ely_time_diff(ely_more start, ely_more end);
 
 // ------------------------ Файлы ------------------------
 typedef struct ely_file ely_file;
-ely_file* ely_file_open(char* path, char* mode);
+ely_file* ely_file_open(const char* path, const char* mode);
 void       ely_file_close(ely_file* f);
-int        ely_file_write(ely_file* f, char* data, size_t len);
+int        ely_file_write(ely_file* f, const char* data, size_t len);
 char*      ely_file_read(ely_file* f, size_t* out_len);
-int        ely_file_exists(char* path);
-char*      ely_file_read_all(char* path, size_t* out_len);
-int        ely_file_remove(char* path);
-int        ely_file_rename(char* old, char* new);
-int        ely_file_write_all(char* path, char* data, size_t len);
+int        ely_file_exists(const char* path);
+char*      ely_file_read_all(const char* path, size_t* out_len);
+int        ely_file_remove(const char* path);
+int        ely_file_rename(const char* old, const char* new_path);
+int        ely_file_write_all(const char* path, const char* data, size_t len);
 
 // ------------------------ Пути ------------------------
-ely_str ely_path_join(ely_str a, ely_str b);
-ely_str ely_path_basename(ely_str path);
-ely_str ely_path_dirname(ely_str path);
-int      ely_path_is_absolute(ely_str path);
+ely_str ely_path_join(const char* a, const char* b);
+ely_str ely_path_basename(const char* path);
+ely_str ely_path_dirname(const char* path);
+int      ely_path_is_absolute(const char* path);
 
 // ------------------------ Динамические библиотеки ------------------------
-void* ely_load_library(char* path);
-void* ely_get_function(void* lib, char* name);
+void* ely_load_library(const char* path);
+void* ely_get_function(void* lib, const char* name);
 void  ely_close_library(void* lib);
 int   ely_call_int_int(void* func, int a, int b);
 double ely_call_double_double(void* func, double a);
@@ -193,7 +201,7 @@ void* ely_alloc(size_t size);
 void  ely_free(void* ptr);
 
 // ------------------------ JSON парсинг ------------------------
-dict* ely_dictify(char* json);
+dict* ely_dictify(const char* json);
 
 // ------------------------ Обёртки для массивов (ely_value*) ------------------------
 void ely_array_push(ely_value* arr, ely_value* elem);

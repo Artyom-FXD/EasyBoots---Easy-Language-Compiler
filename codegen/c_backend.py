@@ -42,6 +42,8 @@ class CCodeGen:
         self.class_structs = {}
         self.class_vtables = {}
         self.current_class_name = None
+        self.current_namespace = None
+        self.interface_vtables = {}
 
     def _init_builtins(self):
         builtins = {
@@ -127,6 +129,7 @@ class CCodeGen:
             'fields':  ('ely_value_get_fields', 'arr<str>', ['any']),
             'methods': ('ely_value_get_methods','arr<str>', ['any']),
             'isType': ('isType', 'bool', ['any', 'str']),
+            'classInfoName': ('ely_get_class_info_name', 'str', ['str']),
         }
         for name, (c_name, ret, params) in builtins.items():
             self.builtin_signatures[name] = (c_name, ret, params)
@@ -205,20 +208,31 @@ class CCodeGen:
             arg_code = self.gen_expression(expr.argument)
             return f"ely_value_get_methods({arg_code})"
         elif isinstance(expr, Call):
-            if isinstance(expr.callee, MemberAccess):
-                obj = expr.callee.object
-                method = expr.callee.member
-                obj_type = self._get_expression_type(obj)
-                if obj_type.startswith('arr<'):
-                    if method == 'len':
-                        return 'int'
-                    elif method == 'pop':
-                        return 'any'
-                    elif method == 'push':
-                        return 'void'
-                elif obj_type.startswith('dict<'):
-                    if method == 'keys':
-                        return 'arr<str>'
+            if isinstance(expr.callee, Identifier):
+                if expr.callee.name.endswith('_constructor'):
+                    class_name = expr.callee.name[:-len('_constructor')]
+                    if class_name in self.classes_ast:
+                        return class_name
+                if expr.callee.name in self.original_functions:
+                    ret = self.original_functions[expr.callee.name].return_type
+                    if ret:
+                        return self._resolve_type_alias(ret)
+            elif isinstance(expr, MemberAccess):
+                obj_type = self._get_expression_type(expr.object)
+                if obj_type in self.classes_ast:
+                    cls = self.classes_ast[obj_type]
+                    # ищем поле в иерархии
+                    def find_field(c):
+                        for f in c.fields:
+                            if f.name == expr.member:
+                                return f.type
+                        if c.extends and c.extends in self.classes_ast:
+                            return find_field(self.classes_ast[c.extends])
+                        return None
+                    field_type = find_field(cls)
+                    if field_type:
+                        return self._resolve_type_alias(field_type)
+                return 'any'
             elif isinstance(expr.callee, Identifier):
                 func_name = expr.callee.name
                 if func_name in self.original_functions:
@@ -234,37 +248,35 @@ class CCodeGen:
             return 'any'
         return 'any'
 
-    def _type_to_c(self, ely_type: str, for_signature: bool = False) -> str:
+    def _type_to_c(self, ely_type: str, for_signature=False, is_param=False,
+                is_self=False, is_field=False) -> str:
         ely_type = self._resolve_type_alias(ely_type)
-        
-        if for_signature and ely_type != 'void':
+        # если это имя класса и используется как параметр/поле/self
+        if ely_type in self.classes_ast:
+            if is_param or is_self or is_field:
+                return f"struct {ely_type}*"
             return 'ely_value*'
-        
         mapping = {
-            'void': 'void',
-            'bool': 'int',
-            'byte': 'signed char',
-            'ubyte': 'unsigned char',
-            'int': 'int',
-            'uint': 'unsigned int',
-            'more': 'long long',
-            'umore': 'unsigned long long',
-            'flt': 'float',
-            'double': 'double',
-            'str': 'char*',
-            'any': 'ely_value*',
-            'char': 'char',
+            'void': 'void', 'bool': 'int', 'byte': 'signed char', 'ubyte': 'unsigned char',
+            'int': 'int', 'uint': 'unsigned int', 'more': 'long long', 'umore': 'unsigned long long',
+            'flt': 'float', 'double': 'double', 'str': 'char*', 'any': 'ely_value*', 'char': 'char',
         }
+        if ely_type in self.classes_ast:
+            if is_self or is_field:
+                return f"struct {ely_type}*"
+            return 'ely_value*'
         if ely_type.startswith('arr<') or ely_type.startswith('dict<'):
             return 'ely_value*'
         if ely_type in mapping:
+            if for_signature and not is_param and ely_type != 'void':
+                return 'ely_value*'
             return mapping[ely_type]
         if ely_type in self.structs:
             return f"struct {ely_type}"
         if ely_type.endswith('*'):
             inner = ely_type[:-1].strip()
-            return f"{self._type_to_c(inner)}*"
-        return ely_type
+            return f"{self._type_to_c(inner, for_signature, is_param, is_self, is_field)}*"
+        return 'ely_value*'
 
     def _type_to_tag(self, ely_type: str) -> int:
         tags = {
@@ -301,22 +313,20 @@ class CCodeGen:
         self.code.append('#include <stdlib.h>\n')
         self.code.append('#include <setjmp.h>\n')
         self.code.append('#include <stdint.h>\n')
+        self.code.append('#include <string.h>\n')
         for mod in self.used_modules:
             self.code.append(f'#include "{mod}.h"\n')
         self.code.append('\n')
         self.code.append('static jmp_buf __ex_buf;\n')
         self.code.append('static ely_value* __ex_value = NULL;\n')
+        self.code.append('')
 
+        # Первичный проход: регистрируем все сущности
         for stmt in program.statements:
             if isinstance(stmt, GlobalCBlock):
                 self.code.append(stmt.code)
-        self.code.append('')
-
-        for stmt in program.statements:
-            if isinstance(stmt, TypeAlias):
+            elif isinstance(stmt, TypeAlias):
                 self.type_aliases[stmt.name] = stmt.target_type
-            elif isinstance(stmt, MethodDeclaration):
-                self.original_functions[stmt.name] = stmt
             elif isinstance(stmt, StructDeclaration):
                 self.structs.add(stmt.name)
                 fields = {}
@@ -325,100 +335,145 @@ class CCodeGen:
                 self.struct_fields[stmt.name] = fields
             elif isinstance(stmt, ExternFunction):
                 self.extern_functions[stmt.name] = stmt
-            if isinstance(stmt, ClassDeclaration):
+            elif isinstance(stmt, ClassDeclaration):
                 self.classes_ast[stmt.name] = stmt
+                # собираем all_methods (с учётом свойств)
+                all_methods = []
+                if stmt.extends:
+                    parent = self.classes_ast.get(stmt.extends)
+                    if parent:
+                        all_methods.extend(parent.all_methods)
+                all_methods.extend(stmt.methods)
+                for prop in stmt.properties:
+                    if prop.getter:
+                        all_methods.append(prop.getter)
+                    if prop.setter:
+                        all_methods.append(prop.setter)
+                stmt.all_methods = all_methods
+                # регистрируем методы в original_functions для кодогенерации
                 for method in stmt.methods:
                     full_name = f"{stmt.name}_{method.name}"
                     self.original_functions[full_name] = method
+                # конструктор регистрируем (пока формально)
                 self.original_functions[f"{stmt.name}_constructor"] = MethodDeclaration(
                     line=stmt.line, col=stmt.col,
-                    return_type=stmt.name,   # возвращаемый тип – объект класса
+                    return_type=stmt.name,
                     name=f"{stmt.name}_constructor",
                     parameters=[Parameter(type=f.type, name=f.name) for f in stmt.wait_fields],
                     body=[],
                     modifier='public'
                 )
-        for stmt in program.statements:
-            if isinstance(stmt, UsingDirective):
-                self.used_modules.append(stmt.module)
+            elif isinstance(stmt, MethodDeclaration):
+                # глобальные функции
+                self.original_functions[stmt.name] = stmt
 
-        for stmt in program.statements:
-            if isinstance(stmt, ExternFunction):
-                ret_type = self._type_to_c(stmt.return_type or 'void')
-                params = []
-                for p in stmt.parameters:
-                    if p.type == '...':
-                        params.append("...")
-                    else:
-                        param_type = self._type_to_c(p.type)
-                        params.append(f"{param_type} {p.name}")
-                param_str = ", ".join(params)
-                self.emit(f"extern {ret_type} {stmt.name}({param_str});")
-        self.code.append('\n')
+        # 1. Структуры классов
+        for cls in self.classes_ast.values():
+            self._gen_class_struct(cls)
+        self.code.append('')
 
-        for stmt in program.statements:
-            if isinstance(stmt, StructDeclaration):
-                self._gen_struct(stmt)
+        # 2. Объявления vtable
+        for cls in self.classes_ast.values():
+            self._gen_vtable_decl(cls)
+        self.code.append('')
 
-        if not self.is_module:
-            has_main = any(isinstance(s, MethodDeclaration) and s.name == 'main' for s in program.statements)
-            if not has_main:
-                self.main_code.append("int main() {")
-                self.main_code.append("    gc_init();")
-                self.main_code.append("    if (_global_init) _global_init();")
-                self.main_code.append("    return 0;")
-                self.main_code.append("}")
-
-        global_methods = []
-        class_methods = {}
-
-        for stmt in program.statements:
-            if isinstance(stmt, MethodDeclaration):
-                global_methods.append(stmt)
-
-        for name, cls in self.classes_ast.items():
-            class_methods[name] = cls.methods
-
+        # 3. Глобальные переменные и статические поля классов
         for stmt in program.statements:
             if isinstance(stmt, VariableDeclaration):
                 self._gen_global_variable(stmt)
+        for cls in self.classes_ast.values():
+            for f in cls.static_fields:
+                self.emit(f"static ely_value* {self._ns_prefix()}{cls.name}_{f.name};")
+
+        # 4. Forward-объявления методов (экземпляра)
+        global_methods = []
+        class_methods = {}
+        for stmt in program.statements:
+            if isinstance(stmt, MethodDeclaration):
+                global_methods.append(stmt)
+        for cls_name, cls in self.classes_ast.items():
+            class_methods[cls_name] = [m for m in cls.methods if not m.name.endswith('_constructor')]
 
         for method in global_methods:
             self.current_class_name = None
             self._forward_declare(method)
-        for class_name, methods in class_methods.items():
-            self.current_class_name = class_name
+        for cls_name, methods in class_methods.items():
+            self.current_class_name = cls_name
             for method in methods:
                 self._forward_declare(method)
 
+        # 5. Forward-объявления статических методов
         for cls in self.classes_ast.values():
-            self._gen_class_constructor_forward(cls)
+            for sm in cls.static_methods:
+                self._forward_declare_static(cls, sm)
+
+        # 6. Forward-объявления конструкторов
+        for cls in self.classes_ast.values():
+            params = self._collect_constructor_params(cls)
+            param_str = ', '.join([f"struct {cls.name}* self"] +
+                                [f"{self._type_to_c(p.type, is_param=True)} {p.name}" for p in params])
+            self.code.append(f"void {cls.name}_constructor({param_str});")
+
+        # 7. Vtable-экземпляры и недостающие заглушки наследования
+        for cls in self.classes_ast.values():
+            self._gen_vtable_impl(cls)
+
+        # 8. Конструкторы
         for cls in self.classes_ast.values():
             self._gen_class_constructor(cls)
 
+        # 9. Глобальные функции
         for method in global_methods:
             self.current_class_name = None
             self._gen_function(method)
 
-        for class_name, methods in class_methods.items():
-            self.current_class_name = class_name
+        # 10. Методы экземпляров
+        for cls_name, methods in class_methods.items():
+            self.current_class_name = cls_name
             for method in methods:
                 self._gen_function(method)
-        self.current_class_name = None
 
+        # 11. Статические методы
         for cls in self.classes_ast.values():
-            self._gen_vtable(cls)
+            for sm in cls.static_methods:
+                self._gen_static_method(cls, sm)
 
-        if self.global_vars_to_init:
-            self._create_global_init()
+        # 12. Класс-инфо для рефлексии
+        for cls in self.classes_ast.values():
+            self._gen_class_info(cls)
+
+        # 13. Интерфейсные vtable (если есть)
+        for stmt in program.statements:
+            if isinstance(stmt, InterfaceDeclaration):
+                self._gen_interface_vtable(stmt)
+
+        # 14. Глобальная инициализация
+        self._emit_global_init()
+
+        # 15. Реестр классов
+        self.code.append("static ely_class_info* class_registry[] = {")
+        for cls in self.classes_ast.values():
+            self.code.append(f"    &{self._ns_prefix()}{cls.name}_class_info,")
+        self.code.append("    NULL")
+        self.code.append("};")
+        self.code.append("""
+    ely_class_info* ely_get_class_info(const char* name) {
+        for (int i = 0; class_registry[i] != NULL; i++) {
+            if (strcmp(class_registry[i]->name, name) == 0)
+                return class_registry[i];
+        }
+        return NULL;
+    }
+    """)
 
         final_code = self.code + self.specializations + self.main_code
         return "\n".join(final_code)
 
     def _method_full_name(self, method_name: str) -> str:
+        ns = self._ns_prefix()
         if self.current_class_name:
-            return f"{self.current_class_name}_{method_name}"
-        return method_name
+            return f"{ns}{self.current_class_name}_{method_name}"
+        return f"{ns}{method_name}"
 
     def _resolve_type_alias(self, type_name: str) -> str:
         while type_name in self.type_aliases:
@@ -438,7 +493,7 @@ class CCodeGen:
         self.global_types[node.name] = resolved_type
 
     def _create_global_init(self):
-        self.emit("static void _global_init(void) {")
+        self.emit("void _global_init(void) {")
         self.indent += 1
         for name, typ, init_node in self.global_vars_to_init:
             if isinstance(init_node, ArrayLiteral):
@@ -448,6 +503,12 @@ class CCodeGen:
             else:
                 init_code = self.gen_expression(init_node)
                 self.emit(f"{name} = {init_code};")
+        for cls in self.classes_ast.values():
+            for f in cls.static_fields:
+                init_val = "ely_value_new_int(0)"
+                if f.initializer:
+                    init_val = self.gen_expression(f.initializer)
+                self.emit(f"{self._ns_prefix()}{cls.name}_{f.name} = {init_val};")
         self.indent -= 1
         self.emit("}")
 
@@ -532,35 +593,51 @@ class CCodeGen:
             self.error("Cannot declare variable of type void", node)
             return
 
-        ctype = 'ely_value*'
+        # Определяем C-тип и флаг, является ли тип классом (структурой)
+        is_class = resolved_type in self.classes_ast
+        ctype = f"struct {resolved_type}*" if is_class else self._type_to_c(resolved_type)
+
+        # Инициализатор
+        init_code = None
         if node.initializer:
             init_code = self.gen_expression(node.initializer)
-            if resolved_type not in ('any', 'void', 'arr', 'dict', '*'):
+            # Если класс, конструктор уже вернул указатель – используем как есть
+            # иначе приводим к нужному типу
+            if not is_class:
                 source_type = self._get_expression_type(node.initializer)
                 if source_type != resolved_type:
                     init_code = self._convert_value(init_code, source_type, resolved_type)
+
+        # Объявление и инициализация
+        if init_code:
             self.emit_to_main(f"{ctype} {node.name} = {init_code};")
         else:
-            if resolved_type in self.classes_ast:
-                need_args = any(f.initializer is None for f in self.classes_ast[resolved_type].wait_fields)
-                if need_args:
-                    self.error(f"Class '{resolved_type}' requires constructor arguments (no defaults for all wait fields)", node)
-                    return
-                self.emit_to_main(f"{ctype} {node.name} = {resolved_type}_constructor();")
-            elif resolved_type == 'int':
-                self.emit_to_main(f"{ctype} {node.name} = ely_value_new_int(0);")
-            elif resolved_type == 'bool':
-                self.emit_to_main(f"{ctype} {node.name} = ely_value_new_bool(0);")
-            elif resolved_type in ('flt', 'double'):
-                self.emit_to_main(f"{ctype} {node.name} = ely_value_new_double(0.0);")
+            # Значение по умолчанию
+            if is_class:
+                self.emit_to_main(f"{ctype} {node.name} = NULL;")
             else:
-                self.emit_to_main(f"{ctype} {node.name} = ely_value_new_null();")
+                if resolved_type == 'int':
+                    self.emit_to_main(f"{ctype} {node.name} = ely_value_new_int(0);")
+                elif resolved_type in ('flt', 'double'):
+                    self.emit_to_main(f"{ctype} {node.name} = ely_value_new_double(0.0);")
+                elif resolved_type == 'bool':
+                    self.emit_to_main(f"{ctype} {node.name} = ely_value_new_bool(0);")
+                elif resolved_type == 'str':
+                    self.emit_to_main(f"{ctype} {node.name} = ely_value_new_string(NULL);")
+                else:
+                    self.emit_to_main(f"{ctype} {node.name} = ely_value_new_null();")
 
+        # Регистрируем переменную как корень, если она управляется сборщиком
+        # (для ely_value* или struct*)
+        if is_class or ctype == 'ely_value*' or ctype.startswith('ely_value*'):
+            self.emit_to_main(f"gc_add_root((void**)&{node.name});")
+
+        # Запоминаем тип переменной
         self.var_types[node.name] = resolved_type
-        self.emit_to_main(f"gc_add_root((void**)&{node.name});")
-        if self.scope_roots:
-            if node.name and node.name != 'None' and node.name != 'NULL':
-                self.scope_roots[-1].append(node.name)
+
+        # Добавляем в список корней текущей области видимости для автоматического удаления
+        if self.scope_roots and node.name not in ('None', 'NULL'):
+            self.scope_roots[-1].append(node.name)
 
     def _gen_primitive_expression(self, expr: Expression) -> str:
         if isinstance(expr, Literal):
@@ -648,7 +725,8 @@ class CCodeGen:
 
     def _wrap_result(self, call_expr: str, return_type: str) -> str:
         if return_type == 'void':
-            return f"({call_expr}, ely_value_new_null())"
+            # Используем GCC statement expression: ({ stmt; expr; })
+            return f"({{ {call_expr}; ely_value_new_null(); }})"
         if return_type in ('int', 'uint', 'more', 'umore', 'byte', 'ubyte'):
             return f"ely_value_new_int({call_expr})"
         if return_type in ('double', 'flt'):
@@ -679,28 +757,11 @@ class CCodeGen:
         return None
 
     def _convert_value(self, value_code: str, from_type: str, to_type: str) -> str:
-        if from_type == to_type or not to_type or to_type == 'any':
-            return value_code
+        # Все значения уже ely_value* (кроме классовых приведений)
         if from_type in self.classes_ast and to_type in self.classes_ast:
-            return value_code
-
-        if from_type in ('any', None):
-            if to_type == 'int':
-                return f'ely_value_new_int(ely_value_as_int({value_code}))'
-            elif to_type in ('flt', 'double'):
-                return f'ely_value_new_double(ely_value_as_double({value_code}))'
-            elif to_type == 'bool':
-                return f'ely_value_new_bool(ely_value_as_bool({value_code}))'
-            elif to_type == 'str':
-                return f'ely_value_new_string(ely_value_to_string({value_code}))'
-
-        if self.is_numeric(from_type) and self.is_numeric(to_type):
-            if to_type == 'int':
-                return f'ely_value_new_int(ely_value_as_int({value_code}))'
-            elif to_type in ('flt', 'double'):
-                return f'ely_value_new_double(ely_value_as_double({value_code}))'
-
-        return f'ely_value_new_string(ely_value_to_string({value_code}))'
+            if not self._is_subclass(from_type, to_type):
+                pass   # можно позже добавить приведение
+        return value_code
 
     def is_numeric(self, ely_type: str) -> bool:
         return ely_type in ('int', 'uint', 'more', 'umore', 'flt', 'double', 'byte', 'ubyte')
@@ -939,6 +1000,15 @@ class CCodeGen:
             return self._gen_dict_literal(expr)
         elif isinstance(expr, IndexExpression):
             return self._gen_index_expression(expr)
+        elif isinstance(expr, TypeOfExpression):
+            arg_code = self.gen_expression(expr.argument)
+            return f"ely_value_new_string(ely_typeof({arg_code}))"
+        elif isinstance(expr, FieldsExpression):
+            arg_code = self.gen_expression(expr.argument)
+            return f"ely_value_get_fields({arg_code})"
+        elif isinstance(expr, MethodsExpression):
+            arg_code = self.gen_expression(expr.argument)
+            return f"ely_value_get_methods({arg_code})"
         else:
             self.error(f"Unknown expression type: {type(expr).__name__}", expr)
             return None
@@ -964,8 +1034,62 @@ class CCodeGen:
 
         if self.current_class_name:
             cls = self.classes_ast.get(self.current_class_name)
-            if cls and node.name in [f.name for f in cls.fields]:
-                return f"ely_value_get_key(self, \"{node.name}\")"
+            if cls:
+                # статические поля
+                for sf in cls.static_fields:
+                    if sf.name == node.name:
+                        return f"{self._ns_prefix()}{self.current_class_name}_{sf.name}"
+                # статические методы
+                for sm in cls.static_methods:
+                    if sm.name == node.name:
+                        return f"{self._method_full_name(sm.name)}"
+                # поля экземпляра (с учётом наследования)
+                                # поля экземпляра (с учётом наследования)
+                if self._is_field_in_class_hierarchy(cls, node.name):
+                    owner = cls
+                    parts = []          # цепочка классов-родителей
+                    while owner:
+                        for f in owner.fields:
+                            if f.name == node.name:
+                                access = "self"
+                                if parts:
+                                    # self — указатель, __parent — встроенная структура
+                                    access += "->__parent"
+                                    # если родительских уровней больше одного (пока нет), были бы ещё .__parent
+                                access += f".{node.name}" if parts else f"->{node.name}"
+                                # оборачиваем в ely_value*
+                                if f.type == 'str':
+                                    return f"ely_value_new_string({access})"
+                                elif f.type in ('int','uint','more','umore','byte','ubyte'):
+                                    return f"ely_value_new_int({access})"
+                                elif f.type in ('flt','double'):
+                                    return f"ely_value_new_double({access})"
+                                elif f.type == 'bool':
+                                    return f"ely_value_new_bool({access})"
+                                else:
+                                    return access   # объектный тип (указатель)
+                        if owner.extends and owner.extends in self.classes_ast:
+                            parts.append(owner.extends)
+                            owner = self.classes_ast[owner.extends]
+                        else:
+                            break
+
+        # Проверка на статическое поле/метод класса (Class_field, Class_method)
+        if '_' in node.name and not node.name.startswith('__'):
+            parts = node.name.split('_', 1)
+            class_part = parts[0]
+            field_part = parts[1]
+            if class_part in self.classes_ast:
+                cls = self.classes_ast[class_part]
+                # статическое поле
+                for sf in cls.static_fields:
+                    if sf.name == field_part:
+                        return f"{class_part}_{field_part}"
+                # статический метод
+                for sm in cls.static_methods:
+                    if sm.name == field_part:
+                        # если находимся внутри метода класса, даём полное имя, иначе просто имя
+                        return self._method_full_name(sm.name) if self.current_class_name else f"{class_part}_{sm.name}"
 
         self._ensure_identifier(node.name, node.line, node.col)
         return node.name
@@ -974,20 +1098,33 @@ class CCodeGen:
         left = self.gen_expression(node.left)
         right = self.gen_expression(node.right)
         op = node.operator
+
+        left_type = self._get_expression_type(node.left)
+        right_type = self._get_expression_type(node.right)
+
+        # Операторные методы классов
+        if left_type in self.classes_ast:
+            op_method_map = {
+                '+': '__add', '-': '__sub', '*': '__mul', '/': '__div',
+                '%': '__mod', '==': '__eq', '!=': '__ne',
+                '<': '__lt', '<=': '__le', '>': '__gt', '>=': '__ge',
+            }
+            method_name = op_method_map.get(op)
+            if method_name:
+                cls = self.classes_ast[left_type]
+                for m in cls.all_methods:
+                    if m.name == method_name:
+                        if len(m.parameters) >= 1:
+                            expected_type = m.parameters[0].type
+                            right = self._convert_to_c_type_expr(right, self._type_to_c(expected_type, is_param=True))
+                        return f"({left}->__vtable->{method_name}({left}, {right}))"
+
+        # Обычные runtime-операции
         op_map = {
-            '+': 'add',
-            '-': 'sub',
-            '*': 'mul',
-            '/': 'div',
-            '%': 'mod',
-            '==': 'eq',
-            '!=': 'ne',
-            '<': 'lt',
-            '<=': 'le',
-            '>': 'gt',
-            '>=': 'ge',
-            '&&': 'and',
-            '||': 'or',
+            '+': 'add', '-': 'sub', '*': 'mul', '/': 'div',
+            '%': 'mod', '==': 'eq', '!=': 'ne',
+            '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge',
+            '&&': 'and', '||': 'or',
         }
         func = f"ely_value_{op_map.get(op, op)}"
         return f"{func}({left}, {right})"
@@ -1012,18 +1149,6 @@ class CCodeGen:
         if isinstance(expr, MemberAccess):
             return True
         return False
-
-    def _gen_identifier(self, node: Identifier) -> str:
-        if node.name == 'self' and self.current_class_name:
-            return "self"
-
-        if self.current_class_name:
-            cls = self.classes_ast.get(self.current_class_name)
-            if cls and self._is_field_in_class_hierarchy(cls, node.name):
-                return f"ely_value_get_key(self, \"{node.name}\")"
-
-        self._ensure_identifier(node.name, node.line, node.col)
-        return node.name
 
     def _is_field_in_class_hierarchy(self, cls: ClassDeclaration, field_name: str) -> bool:
         if field_name in [f.name for f in cls.fields]:
@@ -1063,14 +1188,23 @@ class CCodeGen:
 
         if isinstance(node.target, Identifier):
             name = node.target.name
-            found = (name in self.var_types)
+            found = (name in self.var_types) or (name in self.global_types)
             if not found:
                 for scope in reversed(self.scopes):
                     if name in scope:
                         found = True
                         break
-            if name in self.global_types:
-                found = True
+                # проверим статические поля классов (Class_field)
+                if not found and '_' in name and not name.startswith('__'):
+                    parts = name.split('_', 1)
+                    class_part = parts[0]
+                    field_part = parts[1]
+                    if class_part in self.classes_ast:
+                        cls = self.classes_ast[class_part]
+                        for sf in cls.static_fields:
+                            if sf.name == field_part:
+                                found = True
+                                break
             if not found:
                 self.var_types[name] = 'any'
                 self.emit_to_main(f"ely_value* {name};")
@@ -1078,26 +1212,100 @@ class CCodeGen:
                 if self.scope_roots and name and name not in ['None', 'NULL']:
                     self.scope_roots[-1].append(name)
 
+        # Преобразование типа значения, если нужно
         if target_ely_type and target_ely_type not in ('any', 'void', 'arr', 'dict', '*'):
             source_type = self._get_expression_type(node.value)
             if source_type != target_ely_type:
                 value_code = self._convert_value(value_code, source_type, target_ely_type)
 
-        if isinstance(node.target, MemberAccess):
-            obj = self.gen_expression(node.target.object)
-            self.emit_to_main(f"gc_write_barrier({obj}, (void**)&({obj}->{node.target.member}), {value_code});")
-            return f"{obj}->{node.target.member} = {value_code}"
-        if isinstance(node.target, IndexExpression):
-            target = self.gen_expression(node.target.target)
-            index = self.gen_expression(node.target.index)
-            return f"ely_value_set_index({target}, {index}, {value_code})"
-
+        # 1. Присваивание полю текущего объекта (self.field)
         if isinstance(node.target, Identifier) and self.current_class_name:
             cls = self.classes_ast.get(self.current_class_name)
             if cls and self._is_field_in_class_hierarchy(cls, node.target.name):
-                return f"ely_value_set_key(self, \"{node.target.name}\", {value_code})"
+                # строим путь до поля
+                owner = cls
+                parts = []
+                field = None
+                while owner:
+                    for f in owner.fields:
+                        if f.name == node.target.name:
+                            field = f
+                            break
+                    if field:
+                        break
+                    if owner.extends and owner.extends in self.classes_ast:
+                        parts.append(owner.extends)
+                        owner = self.classes_ast[owner.extends]
+                    else:
+                        break
+                access = "self"
+                for p in parts:
+                    access += ".__parent"
+                if parts:
+                    access += "->__parent"
+                    access += f".{node.target.name}"
+                else:
+                    access += f"->{node.target.name}"
+                # преобразование значения
+                if field.type == 'str':
+                    value_code = f"ely_str_dup({value_code})"
+                elif field.type in ('int','uint','more','umore','byte','ubyte'):
+                    value_code = f"ely_value_as_int({value_code})"
+                elif field.type in ('flt','double'):
+                    value_code = f"ely_value_as_double({value_code})"
+                elif field.type == 'bool':
+                    value_code = f"ely_value_as_bool({value_code})"
+                return f"{access} = {value_code};"
 
-        return f"{target_code} = {value_code}"
+        # 2. Присваивание свойству через сеттер (self.property или obj.property)
+        if isinstance(node.target, MemberAccess):
+            obj_type = self._get_expression_type(node.target.object)
+            if obj_type in self.classes_ast:
+                cls = self.classes_ast[obj_type]
+                # Свойство (сеттер)
+                for prop in cls.properties:
+                    if prop.name == node.target.member and prop.setter:
+                        obj_code = self.gen_expression(node.target.object)
+                        # преобразуем значение в тип свойства
+                        val_code = value_code
+                        if prop.type == 'str':
+                            val_code = f"ely_value_to_string({value_code})"
+                        elif prop.type in ('int','uint','more','umore','byte','ubyte'):
+                            val_code = f"ely_value_as_int({value_code})"
+                        elif prop.type in ('flt','double'):
+                            val_code = f"ely_value_as_double({value_code})"
+                        elif prop.type == 'bool':
+                            val_code = f"ely_value_as_bool({value_code})"
+                        return f"{obj_code}->__vtable->{prop.setter.name}({obj_code}, {val_code});"
+                # Обычное поле чужого объекта (прямой доступ, если это класс)
+                if self._is_field_in_class_hierarchy(cls, node.target.member):
+                    obj_code = self.gen_expression(node.target.object)
+                    # преобразование типа поля
+                    for f in cls.fields:
+                        if f.name == node.target.member:
+                            if f.type == 'str':
+                                value_code = f"ely_value_to_string({value_code})"
+                            elif f.type in ('int','uint','more','umore','byte','ubyte'):
+                                value_code = f"ely_value_as_int({value_code})"
+                            elif f.type in ('flt','double'):
+                                value_code = f"ely_value_as_double({value_code})"
+                            elif f.type == 'bool':
+                                value_code = f"ely_value_as_bool({value_code})"
+                            break
+                    return f"{obj_code}->{node.target.member} = {value_code};"
+
+            # Fallback: старый код для ely_value* (не-класс)
+            obj = self.gen_expression(node.target.object)
+            return f"ely_value_set_key({obj}, \"{node.target.member}\", {value_code})"
+
+        # 3. Статическое поле класса
+        if isinstance(node.target, Identifier) and target_ely_type in self.classes_ast:
+            # Присваивание статическому полю вида `ClassName_field = val`
+            # Уже сгенерировано через target_code, но можем оставить стандартное присваивание
+            return f"{target_code} = {value_code};"
+
+        # 4. Обычное присваивание переменной
+        return f"{target_code} = {value_code};"
 
     def _gen_conditional(self, node: Conditional) -> str:
         cond = self.gen_expression(node.condition)
@@ -1106,60 +1314,65 @@ class CCodeGen:
         return f"((ely_value_as_bool({cond})) ? {then_expr} : {else_expr})"
 
     def _gen_class_constructor_forward(self, cls: ClassDeclaration):
-        all_wait = self._collect_wait_fields(cls)
-        params = ', '.join([f"ely_value* {f.name}" for f in all_wait])
-        self.code.append(f"ely_value* {cls.name}_constructor({params});")
+        own_wait = cls.wait_fields
+        params = ', '.join([f"{self._type_to_c(f.type, is_param=True)} {f.name}" for f in own_wait])
+        self.code.append(f"struct {cls.name}* {cls.name}_constructor({params});")
 
     def _gen_class_constructor(self, cls: ClassDeclaration):
         name = cls.name
         parent = cls.extends
-        wait_fields = self._collect_wait_fields(cls)
-        param_list = ', '.join([f"ely_value* {f.name}" for f in wait_fields])
-
-        self.emit_to_main(f"ely_value* {name}_constructor({param_list}) {{")
+        params = self._collect_constructor_params(cls)
+        param_str = ', '.join([f"struct {name}* self"] + [f"{self._type_to_c(p.type, is_param=True)} {p.name}" for p in params])
+        self.emit(f"void {name}_constructor({param_str}) {{")
         self.indent += 1
-
-        for f in wait_fields:
-            self.var_types[f.name] = f.type
-
-        if parent and cls.super_args:
-            old_class = self.current_class_name
-            self.current_class_name = None
-            super_actuals = ', '.join([self.gen_expression(arg) for arg in cls.super_args])
-            self.current_class_name = old_class
-            self.emit_to_main(f"ely_value* obj = {parent}_constructor({super_actuals});")
-            self.emit_to_main("gc_add_root((void**)&obj);")
-        else:
-            self.emit_to_main("ely_value* obj = ely_value_new_object(dict_new_str());")
-            self.emit_to_main("gc_add_root((void**)&obj);")
-
-        self.emit_to_main(f"ely_value_set_key(obj, \"__class\", ely_value_new_string(\"{name}\"));")
-        self.emit_to_main(f"ely_value_set_key(obj, \"__vtable\", ely_value_new_int((long long)&{name}_vtable_inst));")
-        if parent:
-            self.emit_to_main(f"ely_value_set_key(obj, \"__parent_class\", ely_value_new_string(\"{parent}\"));")
-
-        chain = []
-        cur = name
-        while cur:
-            chain.insert(0, cur)
-            cur_cls = self.classes_ast.get(cur)
-            cur = cur_cls.extends if cur_cls else None
-        self.emit_to_main(f"arr* __chain = arr_new();")
-        for cname in chain:
-            self.emit_to_main(f"arr_push(__chain, ely_value_new_string(\"{cname}\"));")
-        self.emit_to_main(f"ely_value_set_key(obj, \"__class_chain\", ely_value_new_array(__chain));")
-    
-        for f in cls.wait_fields:
-            self.emit_to_main(f"ely_value_set_key(obj, \"{f.name}\", {f.name});")
-
-        self.emit_to_main("gc_remove_root((void**)&obj);")
-        self.emit_to_main("return obj;")
+        # родительский конструктор (если есть) – ДО установки своего vtable
+        if parent and parent in self.classes_ast:
+            parent_wait = self.classes_ast[parent].wait_fields
+            parent_self = f"(struct {parent}*)self" if parent != name else "self"
+            parent_args = ', '.join([parent_self] + [p.name for p in params[:len(parent_wait)]])
+            self.emit(f"{parent}_constructor({parent_args});")
+        # Устанавливаем СВОЙ vtable (после родителя, чтобы не перезаписался)
+        self.emit(f"self->__vtable = &{name}_vtable_inst;")
+        # wait-поля
+        own_wait = cls.wait_fields
+        for i, f in enumerate(own_wait):
+            param_name = params[i + (len(parent_wait) if parent and parent_wait else 0)].name
+            if f.type == 'str':
+                self.emit(f"self->{f.name} = ely_str_dup({param_name});")
+            else:
+                self.emit(f"self->{f.name} = {param_name};")
+        # инициализация обычных полей
+        for f in cls.fields:
+            if f.modifier == 'static':
+                continue
+            if f in cls.wait_fields:
+                continue
+            # значение по умолчанию
+            if f.type == 'str':
+                default_val = "NULL"
+            elif f.type in ('int', 'uint', 'more', 'umore', 'byte', 'ubyte'):
+                default_val = "0"
+            elif f.type in ('flt', 'double'):
+                default_val = "0.0"
+            elif f.type == 'bool':
+                default_val = "0"
+            else:
+                default_val = "NULL"
+            if f.initializer:
+                # используем выражение инициализатора (упрощённо)
+                init_code = self.gen_expression(f.initializer)
+                # преобразуем к целевому C‑типу
+                target_c = self._type_to_c(f.type, is_field=True)
+                if target_c == 'char*':
+                    init_code = f"ely_value_to_string({init_code})"
+                elif target_c in ('int', 'long long', 'unsigned int', 'unsigned long long', 'signed char', 'unsigned char'):
+                    init_code = f"ely_value_as_int({init_code})"
+                elif target_c in ('float', 'double'):
+                    init_code = f"ely_value_as_double({init_code})"
+                default_val = init_code
+            self.emit(f"self->{f.name} = {default_val};")
         self.indent -= 1
-        self.emit_to_main("}")
-
-        for f in wait_fields:
-            if f.name in self.var_types:
-                del self.var_types[f.name]
+        self.emit("}")
 
     def _collect_wait_fields(self, cls: ClassDeclaration) -> List[VariableDeclaration]:
         fields = []
@@ -1232,6 +1445,40 @@ class CCodeGen:
 
     def _gen_member_access(self, node: MemberAccess) -> str:
         obj = self.gen_expression(node.object)
+        obj_type = self._get_expression_type(node.object)
+        if obj_type in self.classes_ast:
+            cls = self.classes_ast[obj_type]
+            # статические поля
+            for sf in cls.static_fields:
+                if sf.name == node.member:
+                    return f"{self._ns_prefix()}{obj_type}_{sf.name}"
+            # поля экземпляра
+            if self._is_field_in_class_hierarchy(cls, node.member):
+                owner = cls
+                parts = []
+                while owner:
+                    for f in owner.fields:
+                        if f.name == node.member:
+                            access = obj
+                            if parts:
+                                access += "->__parent"
+                            access += f".{node.member}" if parts else f"->{node.member}"
+                            # обёртка
+                            if f.type == 'str':
+                                return f"ely_value_new_string({access})"
+                            elif f.type in ('int','uint','more','umore','byte','ubyte'):
+                                return f"ely_value_new_int({access})"
+                            elif f.type in ('flt','double'):
+                                return f"ely_value_new_double({access})"
+                            elif f.type == 'bool':
+                                return f"ely_value_new_bool({access})"
+                            else:
+                                return access
+                    if owner.extends and owner.extends in self.classes_ast:
+                        parts.append(owner.extends)
+                        owner = self.classes_ast[owner.extends]
+                    else:
+                        break
         return f"ely_value_get_key({obj}, \"{node.member}\")"
 
     def _gen_call(self, node: Call) -> str:
@@ -1340,22 +1587,78 @@ class CCodeGen:
                     return ""
 
             if obj_type in self.classes_ast:
-                obj_code = self._gen_expr_rooted(obj)
-                vtable_ptr = f"((struct {obj_type}_vtable*)((long long)ely_value_as_int(ely_value_get_key({obj_code}, \"__vtable\"))))"
-                args_code = [obj_code]                    # self
-                for arg in node.arguments:
-                    args_code.append(self._gen_expr_rooted(arg))
-                call_expr = f"{vtable_ptr}->{node.callee.member}({', '.join(args_code)})"
-                return call_expr
+                obj_code = self.gen_expression(obj)
+                cls = self.classes_ast[obj_type]
+                method_node = None
+                for m in cls.all_methods:
+                    if m.name == node.callee.member:
+                        method_node = m
+                        break
+                if not method_node:
+                    self.error(f"Method '{node.callee.member}' not found in class '{obj_type}'", node)
+                    return "ely_value_new_null()"
+                args = [obj_code]
+                for i, arg_expr in enumerate(node.arguments):
+                    arg_code = self.gen_expression(arg_expr)
+                    if i < len(method_node.parameters):
+                        param = method_node.parameters[i]
+                        expected_c_type = self._type_to_c(param.type, is_param=True)
+                        arg_code = self._convert_to_c_type_expr(arg_code, expected_c_type)
+                    args.append(arg_code)
+                return f"({obj_code}->__vtable->{node.callee.member}({', '.join(args)}))"
 
-            self.error(f"Method calls not supported for type {obj_type}", node)
-            return ""
+            # неявный вызов метода текущего класса
+            if self.current_class_name:
+                cls = self.classes_ast.get(self.current_class_name)
+                if cls:
+                    for m in cls.all_methods:
+                        if m.name == func_name:
+                            args_code = [self.gen_expression(a) for a in node.arguments]
+                            # преобразование аргументов
+                            for i, arg in enumerate(node.arguments):
+                                if i < len(m.parameters):
+                                    expected_c = self._type_to_c(m.parameters[i].type, is_param=True)
+                                    args_code[i] = self._convert_to_c_type_expr(args_code[i], expected_c)
+                            return f"(self->__vtable->{func_name}(self, {', '.join(args_code)}))"
+
+            self.error(f"Unknown function '{func_name}'", node)
+            return "ely_value_new_null()"
 
         if not isinstance(node.callee, Identifier):
             self.error("Call expression must be a function or method", node)
             return "ely_value_new_null()"
 
         func_name = node.callee.name
+
+        # --- Обработка конструкторов ДО original_functions ---
+        if func_name.endswith('_constructor'):
+            class_name = func_name[:-len('_constructor')]
+            cls = self.classes_ast.get(class_name)
+            if not cls:
+                self.error(f"Unknown class {class_name}", node)
+                return "ely_value_new_null()"
+            # выделяем память
+            ctype = f"struct {class_name}*"
+            obj_var = f"__obj_{self.temp_counter}"
+            self.temp_counter += 1
+            self.emit_to_main(f"{ctype} {obj_var} = gc_calloc(sizeof(struct {class_name}), GC_OBJ_OTHER);")
+            self.emit_to_main(f"gc_add_root((void**)&{obj_var});")
+            # собираем аргументы конструктора
+            params = self._collect_constructor_params(cls)
+            args_code = []
+            for i, param in enumerate(params):
+                arg = node.arguments[i] if i < len(node.arguments) else None
+                if arg:
+                    code = self.gen_expression(arg)
+                    code = self._convert_to_c_type_expr(code, self._type_to_c(param.type, is_param=True))
+                else:
+                    code = "ely_value_new_null()"  # значение по умолчанию для ely_value*
+                args_code.append(code)
+            full_args = ', '.join([obj_var] + args_code)
+            self.emit_to_main(f"{class_name}_constructor({full_args});")
+            # удаляем временный корень, чтобы объект жил, пока есть другие корни
+            self.emit_to_main(f"gc_remove_root((void**)&{obj_var});")
+            return obj_var
 
         if func_name in self.original_functions:
             func_node = self.original_functions[func_name]
@@ -1496,14 +1799,15 @@ class CCodeGen:
             return
         if node.type_params:
             return
+        is_static = (node.modifier == 'static')
         ret_type_c = self._type_to_c(node.return_type or 'void', for_signature=True)
         params = []
-        if self.current_class_name:
-            params.append("ely_value* self")
-        params.extend([f"{self._type_to_c(p.type, for_signature=True)} {p.name}" for p in node.parameters])
-        param_str = ", ".join(params)
+        if self.current_class_name and not is_static:
+            params.append(f"struct {self.current_class_name}* self")
+        for p in node.parameters:
+            params.append(f"{self._type_to_c(p.type, for_signature=True, is_param=True)} {p.name}")
         full_name = self._method_full_name(node.name)
-        self.code.append(f"{ret_type_c} {full_name}({param_str});")
+        self.code.append(f"{ret_type_c} {full_name}({', '.join(params)});")
 
     def _gen_function(self, node: MethodDeclaration):
         if node.name == '_global_init':
@@ -1512,14 +1816,19 @@ class CCodeGen:
             return
 
         func_name = self._method_full_name(node.name)
+        is_static = (node.modifier == 'static')
         is_main = (func_name == 'main')
+        is_constructor = func_name.endswith('_constructor')
+
         ret_type_c = 'int' if is_main else self._type_to_c(node.return_type or 'void', for_signature=True)
 
-        params = []
-        if self.current_class_name:
-            params.append("ely_value* self")
-        params.extend([f"{self._type_to_c(p.type, for_signature=True)} {p.name}" for p in node.parameters])
-        param_str = ", ".join(params)
+        # Формируем сигнатуру функции
+        sig_params = []
+        if self.current_class_name and not is_static and not is_constructor:
+            sig_params.append(f"struct {self.current_class_name}* self")
+        for p in node.parameters:
+            sig_params.append(f"{self._type_to_c(p.type, for_signature=True, is_param=True)} {p.name}")
+        param_str = ", ".join(sig_params)
 
         old_main = self.main_code
         self.main_code = []
@@ -1530,28 +1839,30 @@ class CCodeGen:
         self.current_function = func_name
         self.func_return_type = node.return_type or 'void'
         self.hoisted_functions = []
+        self.is_constructor = is_constructor
 
         self.emit_to_main(f"{ret_type_c} {func_name}({param_str}) {{")
         self.indent += 1
 
         if is_main:
             self.emit_to_main("gc_init();")
-            if self.global_vars_to_init and not self.is_module:
-                self.emit_to_main("_global_init();")
+            self.emit_to_main("_global_init();")
+            self.emit_to_main("gc_set_enabled(0);")      # ← временно отключаем GC
 
         self._push_scope()
 
+        # Регистрируем self в области видимости
+        if self.current_class_name and not is_static and not is_constructor:
+            self.var_types['self'] = self.current_class_name
+
+        # Регистрируем параметры и добавляем корни для ely_value*
         for p in node.parameters:
             self.var_types[p.name] = p.type
-            self.emit_to_main(f"gc_add_root((void**)&{p.name});")
-            if self.scope_roots:
-                self.scope_roots[-1].append(p.name)
-
-        if self.current_class_name:
-            self.var_types['self'] = self.current_class_name
-            self.emit_to_main("gc_add_root((void**)&self);")
-            if self.scope_roots:
-                self.scope_roots[-1].append('self')
+            ctype = self._type_to_c(p.type, is_param=True)
+            if ctype == 'ely_value*':
+                self.emit_to_main(f"gc_add_root((void**)&{p.name});")
+                if self.scope_roots:
+                    self.scope_roots[-1].append(p.name)
 
         body_stmts = self._hoist_nested_functions(node.body)
         for stmt in body_stmts:
@@ -1560,6 +1871,7 @@ class CCodeGen:
         self._pop_scope()
         self.indent -= 1
         self.emit_to_main("}")
+
         self.inside_func = False
         self.func_name = None
         self.current_function = old_function
@@ -1569,11 +1881,20 @@ class CCodeGen:
 
         old_main.extend(self.main_code)
         self.main_code = old_main
-    
+
     def _emit_temp_root(self, value_expr: str) -> str:
         tmp = f"__tmp_{self.temp_counter}"
         self.temp_counter += 1
         self.emit_to_main(f"ely_value* {tmp} = {value_expr};")
+        self.emit_to_main(f"gc_add_root((void**)&{tmp});")
+        if self.scope_roots:
+            self.scope_roots[-1].append(tmp)
+        return tmp
+
+    def _temp_root(self, expr_code: str) -> str:
+        tmp = f"__tmp_{self.temp_counter}"
+        self.temp_counter += 1
+        self.emit_to_main(f"ely_value* {tmp} = {expr_code};")
         self.emit_to_main(f"gc_add_root((void**)&{tmp});")
         if self.scope_roots:
             self.scope_roots[-1].append(tmp)
@@ -1585,40 +1906,113 @@ class CCodeGen:
     def _gen_class_struct(self, cls: ClassDeclaration):
         name = cls.name
         parent = cls.extends
-        fields = []
-        if parent and parent in self.classes_ast:
-            parent_cls = self.classes_ast[parent]
-            fields.append(f"struct {parent} __parent;")
-        for f in cls.fields:
-            ctype = self._type_to_c(f.type)
-            fields.append(f"{ctype} {f.name};")
+        self.emit(f"struct {name};")  # forward объявление
         self.emit(f"struct {name} {{")
-        for fld in fields:
-            self.emit(f"    {fld}")
+        self.emit(f"    const struct {name}_vtable* __vtable;")
+        if parent and parent in self.classes_ast:
+            self.emit(f"    struct {parent} __parent;")
+        # Поля класса (не статические)
+        for f in cls.fields:
+            if f.modifier != 'static':
+                ctype = self._type_to_c(f.type, is_field=True)
+                self.emit(f"    {ctype} {f.name};")
         self.emit("};")
-        self.emit(f"typedef struct {name} {name};")
 
-    def _gen_vtable(self, cls: ClassDeclaration):
+    def _gen_vtable_decl(self, cls: ClassDeclaration):
         name = cls.name
         vname = f"{name}_vtable"
-        methods_unique = []
-        seen = set()
-        for m in reversed(cls.all_methods):
-            if m.name not in seen:
-                seen.add(m.name)
-                methods_unique.append(m)
-        methods_unique.reverse()
-        if not methods_unique:
+        # Все нестатические неконструкторные методы из всей иерархии
+        methods = []
+        # Наследуем методы от родителя (если есть) и добавляем свои
+        if cls.extends and cls.extends in self.classes_ast:
+            parent = self.classes_ast[cls.extends]
+            # Получаем список уникальных методов родителя
+            parent_methods = []
+            for m in parent.all_methods:
+                if m.modifier != 'static' and not m.name.endswith('_constructor'):
+                    parent_methods.append(m)
+            # Убираем дубликаты по имени
+            parent_names = {m.name for m in parent_methods}
+            methods = parent_methods.copy()
+            # Добавляем методы из cls, которых нет в родителе, или переопределённые
+            for m in cls.methods:
+                if m.modifier != 'static' and not m.name.endswith('_constructor'):
+                    if m.name in parent_names:
+                        # заменяем
+                        for i, pm in enumerate(methods):
+                            if pm.name == m.name:
+                                methods[i] = m
+                                break
+                        else:
+                            methods.append(m)
+                    else:
+                        methods.append(m)
+        else:
+            methods = [m for m in cls.methods if m.modifier != 'static' and not m.name.endswith('_constructor')]
+        
+        # Также учитываем сеттеры/геттеры свойств
+        for prop in cls.properties:
+            if prop.getter and prop.getter.modifier != 'static':
+                methods.append(prop.getter)   # имена get_xxx уже уникальны
+            if prop.setter and prop.setter.modifier != 'static':
+                methods.append(prop.setter)
+        
+        if not methods:
             return
         self.emit(f"struct {vname} {{")
-        for m in methods_unique:
+        for m in methods:
             ret = self._type_to_c(m.return_type or 'void', for_signature=True)
-            params = ', '.join([f"{self._type_to_c(p.type, for_signature=True)}" for p in m.parameters])
-            self.emit(f"    {ret} (*{m.name})(ely_value* self{', ' if params else ''}{params});")
+            params = ', '.join([f"{self._type_to_c(p.type, for_signature=True, is_param=True)} {p.name}" for p in m.parameters])
+            self.emit(f"    {ret} (*{m.name})(struct {name}* self{', ' if params else ''}{params});")
         self.emit("};")
-        self.emit(f"static struct {vname} {vname}_inst = {{")
-        for m in methods_unique:
-            self.emit(f"    {name}_{m.name},")
+
+    def _gen_vtable_impl(self, cls: ClassDeclaration):
+        name = cls.name
+        vname = f"{name}_vtable"
+        # Собираем список методов так же, как в vtable_decl
+        methods = []
+        if cls.extends and cls.extends in self.classes_ast:
+            parent = self.classes_ast[cls.extends]
+            parent_methods = [m for m in parent.all_methods if m.modifier != 'static' and not m.name.endswith('_constructor')]
+            methods = parent_methods.copy()
+            for m in cls.methods:
+                if m.modifier != 'static' and not m.name.endswith('_constructor'):
+                    if m.name in {pm.name for pm in parent_methods}:
+                        for i, pm in enumerate(methods):
+                            if pm.name == m.name:
+                                methods[i] = m
+                                break
+                    else:
+                        methods.append(m)
+        else:
+            methods = [m for m in cls.methods if m.modifier != 'static' and not m.name.endswith('_constructor')]
+        
+        # Добавляем методы свойств
+        for prop in cls.properties:
+            if prop.getter and prop.getter.modifier != 'static':
+                methods.append(prop.getter)
+            if prop.setter and prop.setter.modifier != 'static':
+                methods.append(prop.setter)
+        
+        if not methods:
+            return
+        
+        # Генерация недостающих функций (например, унаследованных от родителя)
+        for m in methods:
+            # Если метод объявлен в этом классе или переопределён, он уже будет сгенерирован как обычный метод
+            # Если метод родительский и не переопределён, создаём заглушку
+            if m in cls.methods:  # прямо объявлен в cls (оригинал)
+                continue
+            # Проверяем, есть ли уже функция с именем {name}_{m.name}
+            # Сгенерируем заглушку, которая вызывает родительский метод
+            self._gen_inherited_stub(cls, m)
+
+        # Инициализация vtable
+        self.emit(f"static const struct {vname} {vname}_inst = {{")
+        for m in methods:
+            # Имя указываемой функции
+            func_name = f"{name}_{m.name}"
+            self.emit(f"    {func_name},")
         self.emit("};")
 
     def _gen_super_call(self, node: SuperCall) -> str:
@@ -1651,3 +2045,145 @@ class CCodeGen:
         self.emit_to_main(f"ely_value* {tmp} = {code};")
         self.emit_to_main(f"gc_add_root((void**)&{tmp});")
         return tmp
+
+    def _ns_prefix(self) -> str:
+        return self.current_namespace + "_" if self.current_namespace else ""
+
+    def _gen_interface_vtable(self, iface: InterfaceDeclaration):
+        name = iface.name
+        vname = f"{name}_vtable"
+        self.emit(f"struct {vname} {{")
+        for m in iface.methods:
+            ret = self._type_to_c(m.return_type or 'void', for_signature=True)
+            params = ', '.join([f"{self._type_to_c(p.type, for_signature=True, is_param=True)}" for p in m.parameters])
+            self.emit(f"    {ret} (*{m.name})(ely_value* self{', ' if params else ''}{params});")
+        self.emit("};")
+
+    def _gen_class_info(self, cls: ClassDeclaration):
+        name = cls.name
+        ns = self._ns_prefix()
+        fields = [f.name for f in cls.fields if f.modifier != 'static']
+        types = [f.type for f in cls.fields if f.modifier != 'static']
+        self.emit(f"static const char* {ns}{name}_field_names[] = {{ {', '.join(f'"{f}"' for f in fields)} }};")
+        self.emit(f"static const char* {ns}{name}_field_types[] = {{ {', '.join(f'"{t}"' for t in types)} }};")
+        self.emit(f"static ely_class_info {ns}{name}_class_info = {{ \"{name}\", {len(fields)}, {ns}{name}_field_names, {ns}{name}_field_types }};")
+
+    def _emit_global_init(self):
+        self.code.append("static void _global_init(void);")
+        has_init = bool(self.global_vars_to_init)
+        if not has_init:
+            for cls in self.classes_ast.values():
+                if cls.static_fields:
+                    has_init = True
+                    break
+        if has_init:
+            self._create_global_init()
+        else:
+            self.code.append("static void _global_init(void) {}")
+
+    def _gen_inherited_stub(self, cls: ClassDeclaration, method: MethodDeclaration):
+        """Генерирует функцию-заглушку для метода, унаследованного от родителя."""
+        name = cls.name
+        parent = cls.extends
+        ret = self._type_to_c(method.return_type or 'void', for_signature=True)
+        params = ', '.join([f"{self._type_to_c(p.type, for_signature=True, is_param=True)} {p.name}" for p in method.parameters])
+        full_params = f"struct {name}* self"
+        if params:
+            full_params += ", " + params
+        
+        self.emit(f"{ret} {name}_{method.name}({full_params}) {{")
+        self.indent += 1
+        # Вызов метода родителя с преобразованием self
+        parent_func = f"{parent}_{method.name}"
+        cast = f"(struct {parent}*)&self->__parent"
+        call_args = ', '.join([f"{p.name}" for p in method.parameters])
+        if call_args:
+            call = f"{parent_func}({cast}, {call_args})"
+        else:
+            call = f"{parent_func}({cast})"
+        if ret == 'void':
+            self.emit(f"{call};")
+        else:
+            self.emit(f"return {call};")
+        self.indent -= 1
+        self.emit("}")
+
+    def _collect_constructor_params(self, cls: ClassDeclaration) -> List[Parameter]:
+        """Возвращает список параметров конструктора, начиная с родительских wait‑полей (super‑аргументов)."""
+        params = []
+        # Если есть extends и были переданы super_args, они соответствуют wait‑полям родителя
+        if cls.extends and cls.extends in self.classes_ast:
+            parent = self.classes_ast[cls.extends]
+            # Берём wait‑поля родителя, если они есть
+            if cls.super_args:
+                for f in parent.wait_fields:
+                    params.append(Parameter(type=f.type, name=f.name))
+        # Свои wait‑поля
+        for f in cls.wait_fields:
+            params.append(Parameter(type=f.type, name=f.name))
+        return params
+
+    def _convert_to_c_type_expr(self, expr_code: str, target_c_type: str) -> str:
+        if target_c_type == 'char*':
+            return f"ely_value_to_string({expr_code})"
+        if target_c_type in ('int', 'long long', 'unsigned int', 'unsigned long long', 'signed char', 'unsigned char'):
+            return f"ely_value_as_int({expr_code})"
+        if target_c_type in ('float', 'double'):
+            return f"ely_value_as_double({expr_code})"
+        return expr_code
+
+    def _forward_declare_static(self, cls: ClassDeclaration, method: MethodDeclaration):
+        """Forward-объявление для статического метода (нет self)."""
+        full_name = f"{self._method_full_name(method.name)}"
+        ret_type_c = self._type_to_c(method.return_type or 'void', for_signature=True)
+        params = ', '.join([f"{self._type_to_c(p.type, for_signature=True, is_param=True)} {p.name}" for p in method.parameters])
+        self.code.append(f"{ret_type_c} {full_name}({params});")
+
+    def _gen_static_method(self, cls: ClassDeclaration, method: MethodDeclaration):
+        """Генерирует тело статического метода."""
+        full_name = f"{self._method_full_name(method.name)}"
+        ret_type_c = self._type_to_c(method.return_type or 'void', for_signature=True)
+        params = ', '.join([f"{self._type_to_c(p.type, for_signature=True, is_param=True)} {p.name}" for p in method.parameters])
+        param_str = params
+
+        old_main = self.main_code
+        self.main_code = []
+        self.indent = 0
+        self.inside_func = True
+        self.func_name = full_name
+        old_function = self.current_function
+        self.current_function = full_name
+        self.func_return_type = method.return_type or 'void'
+
+        self.emit_to_main(f"{ret_type_c} {full_name}({param_str}) {{")
+        self.indent += 1
+        self._push_scope()
+        # Параметры – в var_types
+        for p in method.parameters:
+            self.var_types[p.name] = p.type
+            if self._type_to_c(p.type, is_param=True) == 'ely_value*':
+                self.emit_to_main(f"gc_add_root((void**)&{p.name});")
+            if self.scope_roots:
+                self.scope_roots[-1].append(p.name)
+        # Тело
+        body_stmts = self._hoist_nested_functions(method.body)
+        for stmt in body_stmts:
+            self.gen_statement(stmt)
+        self._pop_scope()
+        self.indent -= 1
+        self.emit_to_main("}")
+        self.inside_func = False
+        self.current_function = old_function
+        old_main.extend(self.main_code)
+        self.main_code = old_main
+
+    def _promote_to_elyvalue(self, expr_code: str, ely_type: str) -> str:
+        if ely_type == 'str':
+            return f"ely_value_new_string({expr_code})"
+        if ely_type in ('int', 'uint', 'more', 'umore', 'byte', 'ubyte'):
+            return f"ely_value_new_int({expr_code})"
+        if ely_type in ('flt', 'double'):
+            return f"ely_value_new_double({expr_code})"
+        if ely_type == 'bool':
+            return f"ely_value_new_bool({expr_code})"
+        return expr_code

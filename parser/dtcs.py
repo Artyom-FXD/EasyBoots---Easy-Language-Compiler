@@ -237,6 +237,12 @@ class MethodDeclaration(Statement):
     type_params: List[str] = field(default_factory=list)
     is_override: bool = False
 @dataclass
+class PropertyDeclaration:
+    name: str
+    type: str
+    getter: Optional[MethodDeclaration]
+    setter: Optional[MethodDeclaration]
+@dataclass
 class ClassDeclaration(Statement):
     name: str
     extends: Optional[str]
@@ -246,8 +252,22 @@ class ClassDeclaration(Statement):
     wait_fields: List[VariableDeclaration] = field(default_factory=list)
     super_args: List[Expression] = field(default_factory=list)
     all_methods: List[MethodDeclaration] = field(default_factory=list)
+    static_fields: List[VariableDeclaration] = field(default_factory=list)
+    static_methods: List[MethodDeclaration] = field(default_factory=list)
+    properties: List[PropertyDeclaration] = field(default_factory=list)
 
 @dataclass
 class SuperCall(Expression):
     method: Optional[str]
     arguments: List[Expression]
+
+@dataclass
+class InterfaceDeclaration(Statement):
+    name: str
+    methods: List[MethodDeclaration]
+
+@dataclass
+class ImplDeclaration(Statement):
+    class_name: str
+    interface_name: str
+    methods: List[MethodDeclaration]

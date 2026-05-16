@@ -65,4 +65,6 @@ int dict_has_str(dict* d, const char* key);
 int dict_delete_str(dict* d, const char* key);
 arr* dict_keys_str(dict* d);
 
+char* ely_get_class_info_name(const char* name);
+
 #endif

@@ -14,14 +14,16 @@
 #include <dlfcn.h>
 #endif
 
-// -------------------------------------------------------------------
-// Собственные strtoll/strtoull для Windows
-// -------------------------------------------------------------------
+__attribute__((weak))
+ely_class_info* ely_get_class_info(const char* name) {
+    return NULL;
+}
+
 #ifndef _WIN32
 #define my_strtoll strtoll
 #define my_strtoull strtoull
 #else
-static long long my_strtoll(char *nptr, char **endptr, int base) {
+static long long my_strtoll(const char *nptr, char **endptr, int base) {
     long long val = 0;
     int sign = 1;
     if (base == 0) {
@@ -48,7 +50,7 @@ static long long my_strtoll(char *nptr, char **endptr, int base) {
     return sign * val;
 }
 
-static unsigned long long my_strtoull(char *nptr, char **endptr, int base) {
+static unsigned long long my_strtoull(const char *nptr, char **endptr, int base) {
     unsigned long long val = 0;
     if (base == 0) {
         if (*nptr == '0') {
@@ -76,7 +78,7 @@ static unsigned long long my_strtoull(char *nptr, char **endptr, int base) {
 #endif
 
 // ------------------------ Консоль ------------------------
-void ely_print(ely_str str) { if (str) fputs(str, stdout); }
+void ely_print(const char* str) { if (str) fputs(str, stdout); }
 void ely_print_int(ely_int n) { printf("%d", n); }
 void ely_print_uint(ely_uint n) { printf("%u", n); }
 void ely_print_more(ely_more n) { printf("%lld", n); }
@@ -87,7 +89,7 @@ void ely_print_bool(ely_bool b) { fputs(b ? "true" : "false", stdout); }
 void ely_print_char(ely_char c) { putchar(c); }
 void ely_print_byte(ely_byte b) { printf("%d", (int)b); }
 void ely_print_ubyte(ely_ubyte b) { printf("%u", (unsigned int)b); }
-void ely_println(ely_str str) {
+void ely_println(const char* str) {
     if (str) fputs(str, stdout);
     putchar('\n');
     fflush(stdout);
@@ -105,35 +107,35 @@ ely_str ely_input(void) {
     return NULL;
 }
 
-ely_str ely_input_prompt(ely_str prompt) {
+ely_str ely_input_prompt(const char* prompt) {
     if (prompt) ely_print(prompt);
     return ely_input();
 }
 
 // ------------------------ Преобразования строк в числа ------------------------
-ely_int ely_str_to_int(ely_str str) {
+ely_int ely_str_to_int(const char* str) {
     if (!str) return 0;
     long long v = my_strtoll(str, NULL, 10);
     return (ely_int)v;
 }
-ely_uint ely_str_to_uint(ely_str str) {
+ely_uint ely_str_to_uint(const char* str) {
     if (!str) return 0;
     unsigned long long v = my_strtoull(str, NULL, 10);
     return (ely_uint)v;
 }
-ely_more ely_str_to_more(ely_str str) {
+ely_more ely_str_to_more(const char* str) {
     if (!str) return 0;
     return my_strtoll(str, NULL, 10);
 }
-ely_umore ely_str_to_umore(ely_str str) {
+ely_umore ely_str_to_umore(const char* str) {
     if (!str) return 0;
     return my_strtoull(str, NULL, 10);
 }
-ely_flt ely_str_to_flt(ely_str str) {
+ely_flt ely_str_to_flt(const char* str) {
     if (!str) return 0.0f;
     return (ely_flt)strtod(str, NULL);
 }
-ely_double ely_str_to_double(ely_str str) {
+ely_double ely_str_to_double(const char* str) {
     if (!str) return 0.0;
     return strtod(str, NULL);
 }
@@ -176,18 +178,18 @@ ely_str ely_double_to_str(ely_double d) {
     return res;
 }
 ely_str ely_bool_to_str(ely_bool b) {
-    char* s = b ? "true" : "false";
+    const char* s = b ? "true" : "false";
     char* res = gc_alloc(strlen(s) + 1, GC_OBJ_STRING);
     if (res) strcpy(res, s);
     return res;
 }
 
 // ------------------------ Строки ------------------------
-size_t ely_str_len(ely_str str) { return str ? strlen(str) : 0; }
-ely_str ely_str_dup(ely_str str) {
+size_t ely_str_len(const char* str) { return str ? strlen(str) : 0; }
+ely_str ely_str_dup(const char* str) {
     return gc_strdup(str);
 }
-ely_str ely_str_concat(ely_str a, ely_str b) {
+ely_str ely_str_concat(const char* a, const char* b) {
     if (!a && !b) return NULL;
     size_t la = a ? strlen(a) : 0;
     size_t lb = b ? strlen(b) : 0;
@@ -198,13 +200,13 @@ ely_str ely_str_concat(ely_str a, ely_str b) {
     res[la+lb] = '\0';
     return res;
 }
-int ely_str_cmp(ely_str a, ely_str b) {
+int ely_str_cmp(const char* a, const char* b) {
     if (a == b) return 0;
     if (!a) return -1;
     if (!b) return 1;
     return strcmp(a, b);
 }
-ely_str ely_str_substr(ely_str str, size_t start, size_t len) {
+ely_str ely_str_substr(const char* str, size_t start, size_t len) {
     if (!str) return NULL;
     size_t slen = strlen(str);
     if (start >= slen) return ely_str_dup("");
@@ -215,7 +217,7 @@ ely_str ely_str_substr(ely_str str, size_t start, size_t len) {
     res[len] = '\0';
     return res;
 }
-ely_str ely_str_trim(ely_str str) {
+ely_str ely_str_trim(const char* str) {
     if (!str) return NULL;
     while (*str && (*str == ' ' || *str == '\t' || *str == '\n')) str++;
     size_t len = strlen(str);
@@ -226,13 +228,13 @@ ely_str ely_str_trim(ely_str str) {
     res[len] = '\0';
     return res;
 }
-ely_str ely_str_replace(ely_str str, ely_str old, ely_str new) {
+ely_str ely_str_replace(const char* str, const char* old, const char* new_str) {
     if (!str || !old) return ely_str_dup(str);
     size_t old_len = strlen(old);
     if (old_len == 0) return ely_str_dup(str);
-    size_t new_len = new ? strlen(new) : 0;
+    size_t new_len = new_str ? strlen(new_str) : 0;
     size_t count = 0;
-    char* pos = str;
+    const char* pos = str;
     while ((pos = strstr(pos, old))) { count++; pos += old_len; }
     if (count == 0) return ely_str_dup(str);
     size_t result_len = strlen(str) + count * (new_len - old_len);
@@ -246,7 +248,7 @@ ely_str ely_str_replace(ely_str str, ely_str old, ely_str new) {
             size_t before = found - pos;
             memcpy(out, pos, before);
             out += before;
-            if (new) { memcpy(out, new, new_len); out += new_len; }
+            if (new_str) { memcpy(out, new_str, new_len); out += new_len; }
             pos = found + old_len;
         } else {
             strcpy(out, pos);
@@ -303,7 +305,7 @@ typedef struct ely_file {
     FILE* fp;
 } ely_file;
 
-ely_file* ely_file_open(char* path, char* mode) {
+ely_file* ely_file_open(const char* path, const char* mode) {
     FILE* fp = fopen(path, mode);
     if (!fp) return NULL;
     ely_file* f = gc_alloc(sizeof(ely_file), GC_OBJ_STRING);
@@ -316,7 +318,7 @@ void ely_file_close(ely_file* f) {
         if (f->fp) fclose(f->fp);
     }
 }
-int ely_file_write(ely_file* f, char* data, size_t len) {
+int ely_file_write(ely_file* f, const char* data, size_t len) {
     if (!f || !f->fp) return -1;
     return (fwrite(data, 1, len, f->fp) == len) ? 0 : -1;
 }
@@ -347,21 +349,21 @@ char* ely_file_read(ely_file* f, size_t* out_len) {
     result[total] = '\0';
     return result;
 }
-int ely_file_exists(char* path) {
+int ely_file_exists(const char* path) {
     FILE* f = fopen(path, "r");
     if (f) { fclose(f); return 1; }
     return 0;
 }
-char* ely_file_read_all(char* path, size_t* out_len) {
+char* ely_file_read_all(const char* path, size_t* out_len) {
     ely_file* f = ely_file_open(path, "rb");
     if (!f) return NULL;
     char* data = ely_file_read(f, out_len);
     ely_file_close(f);
     return data;
 }
-int ely_file_remove(char* path) { return remove(path); }
-int ely_file_rename(char* old, char* new) { return rename(old, new); }
-int ely_file_write_all(char* path, char* data, size_t len) {
+int ely_file_remove(const char* path) { return remove(path); }
+int ely_file_rename(const char* old, const char* new_path) { return rename(old, new_path); }
+int ely_file_write_all(const char* path, const char* data, size_t len) {
     FILE* f = fopen(path, "wb");
     if (!f) return -1;
     size_t written = fwrite(data, 1, len, f);
@@ -370,7 +372,7 @@ int ely_file_write_all(char* path, char* data, size_t len) {
 }
 
 // ------------------------ Пути ------------------------
-ely_str ely_path_join(ely_str a, ely_str b) {
+ely_str ely_path_join(const char* a, const char* b) {
     if (!a && !b) return NULL;
     if (!a) return ely_str_dup(b);
     if (!b) return ely_str_dup(a);
@@ -384,14 +386,14 @@ ely_str ely_path_join(ely_str a, ely_str b) {
     strcat(res, b);
     return res;
 }
-ely_str ely_path_basename(ely_str path) {
+ely_str ely_path_basename(const char* path) {
     if (!path) return NULL;
     char* sep = strrchr(path, '/');
     if (!sep) sep = strrchr(path, '\\');
     if (!sep) return ely_str_dup(path);
     return ely_str_dup(sep + 1);
 }
-ely_str ely_path_dirname(ely_str path) {
+ely_str ely_path_dirname(const char* path) {
     if (!path) return NULL;
     char* sep = strrchr(path, '/');
     if (!sep) sep = strrchr(path, '\\');
@@ -404,7 +406,7 @@ ely_str ely_path_dirname(ely_str path) {
     res[len] = '\0';
     return res;
 }
-int ely_path_is_absolute(ely_str path) {
+int ely_path_is_absolute(const char* path) {
     if (!path) return 0;
     if (path[0] == '/' || path[0] == '\\') return 1;
 #ifdef _WIN32
@@ -426,11 +428,11 @@ int ely_path_is_absolute(ely_str path) {
 #define LIB_CLOSE(lib) dlclose(lib)
 #endif
 
-void* ely_load_library(char* path) {
+void* ely_load_library(const char* path) {
     if (!path) return NULL;
     return (void*)LIB_LOAD(path);
 }
-void* ely_get_function(void* lib, char* name) {
+void* ely_get_function(void* lib, const char* name) {
     if (!lib || !name) return NULL;
     return LIB_GET(lib, name);
 }
@@ -569,7 +571,7 @@ char* ely_value_to_json(ely_value* v) {
 
 // ------------------------ Парсинг JSON (ely_dictify) ------------------------
 typedef struct json_parser {
-    char* str;
+    const char* str;
     size_t pos;
     size_t len;
 } json_parser;
@@ -607,7 +609,7 @@ static char* parse_string(json_parser* p) {
     return buf;
 }
 static char* parse_number(json_parser* p) {
-    char* start = p->str + p->pos;
+    const char* start = p->str + p->pos;
     while (p->pos < p->len && (isdigit(p->str[p->pos]) || p->str[p->pos] == '.' || p->str[p->pos] == '-' || p->str[p->pos] == 'e' || p->str[p->pos] == 'E')) p->pos++;
     size_t len = p->pos - (start - p->str);
     char* buf = gc_alloc(len + 1, GC_OBJ_STRING);
@@ -637,7 +639,7 @@ static dict* parse_object(json_parser* p);
 static arr* parse_array(json_parser* p);
 static char* parse_value(json_parser* p);
 
-dict* ely_dictify(char* json_str) {
+dict* ely_dictify(const char* json_str) {
     if (!json_str) return NULL;
     json_parser parser = { json_str, 0, strlen(json_str) };
     skip_whitespace(&parser);
@@ -766,7 +768,7 @@ ely_value* ely_value_new_double(double d) {
     v->u.double_val = d;
     return v;
 }
-ely_value* ely_value_new_string(char* s) {
+ely_value* ely_value_new_string(const char* s) {
     ely_value* v = (ely_value*)gc_calloc(sizeof(ely_value), GC_OBJ_VALUE);
     if (!v) return NULL;
     v->type = ely_VALUE_STRING;
@@ -797,7 +799,7 @@ void ely_value_free(ely_value* v) {
     }
 }
 
-ely_value* ely_value_from_json(char* json, size_t* pos) {
+ely_value* ely_value_from_json(const char* json, size_t* pos) {
     (void)pos;
     dict* d = ely_dictify(json);
     if (d) return ely_value_new_object(d);
@@ -824,13 +826,13 @@ ely_value* ely_value_index(ely_value* v, ely_value* index) {
     return ely_value_new_null();
 }
 
-ely_value* ely_value_get_key(ely_value* v, char* key) {
+ely_value* ely_value_get_key(ely_value* v, const char* key) {
     if (!v || v->type != ely_VALUE_OBJECT) return ely_value_new_null();
     dict* d = v->u.object_val;
     return dict_get_str(d, key);
 }
 
-void ely_value_set_key(ely_value* v, char* key, ely_value* value) {
+void ely_value_set_key(ely_value* v, const char* key, ely_value* value) {
     if (!v || v->type != ely_VALUE_OBJECT) return;
     dict* d = v->u.object_val;
     dict_set_str(d, key, value);
@@ -866,7 +868,6 @@ int ely_value_as_bool(ely_value* v) {
 
 ely_value* ely_value_add(ely_value* a, ely_value* b) {
     if (!a || !b) return ely_value_new_null();
-    // Число + число
     if ((a->type == ely_VALUE_INT || a->type == ely_VALUE_DOUBLE) &&
         (b->type == ely_VALUE_INT || b->type == ely_VALUE_DOUBLE)) {
         double da = (a->type == ely_VALUE_INT) ? (double)a->u.int_val : a->u.double_val;
@@ -876,14 +877,12 @@ ely_value* ely_value_add(ely_value* a, ely_value* b) {
         else
             return ely_value_new_double(da + db);
     }
-    // Если хотя бы один операнд строка – конкатенируем строки
     if (a->type == ely_VALUE_STRING || b->type == ely_VALUE_STRING) {
         char* a_str = (a->type == ely_VALUE_STRING) ? ely_str_dup(a->u.string_val) : ely_value_to_string(a);
         char* b_str = (b->type == ely_VALUE_STRING) ? ely_str_dup(b->u.string_val) : ely_value_to_string(b);
         char* result = ely_str_concat(a_str, b_str);
         return ely_value_new_string(result);
     }
-    // По умолчанию – конвертируем в JSON и конкатенируем
     char* a_str = ely_value_to_json(a);
     char* b_str = ely_value_to_json(b);
     char* s = ely_str_concat(a_str, b_str);
@@ -1337,7 +1336,7 @@ ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_va
     }
 
     else if (obj->type == ely_VALUE_STRING) {
-        char* s = obj->u.string_val;
+        const char* s = obj->u.string_val;
         if (!s) return ely_value_new_null();
 
         if (strcmp(method_name, "len") == 0 && argc == 0)
@@ -1362,53 +1361,6 @@ ely_value* ely_value_call_method(ely_value* obj, const char* method_name, ely_va
             if (args[0]->type == ely_VALUE_STRING)
                 return ely_value_new_int(ely_str_cmp(s, args[0]->u.string_val));
         }
-    }
-
-    else if (obj->type == ely_VALUE_INT || obj->type == ely_VALUE_DOUBLE) {
-        double num = (obj->type == ely_VALUE_INT) ? (double)obj->u.int_val : obj->u.double_val;
-        if (strcmp(method_name, "toStr") == 0 && argc == 0) {
-            return ely_value_new_string(obj->type == ely_VALUE_INT ? 
-                                        ely_int_to_str(obj->u.int_val) : 
-                                        ely_double_to_str(obj->u.double_val));
-        }
-        else if (strcmp(method_name, "abs") == 0 && argc == 0) {
-            if (obj->type == ely_VALUE_INT)
-                return ely_value_new_int(abs(obj->u.int_val));
-            else
-                return ely_value_new_double(fabs(obj->u.double_val));
-        }
-        else if (strcmp(method_name, "toInt") == 0 && argc == 0)
-            return ely_value_new_int((int)num);
-        else if (strcmp(method_name, "toDouble") == 0 && argc == 0)
-            return ely_value_new_double(num);
-    }
-
-    else if (obj->type == ely_VALUE_OBJECT) {
-        dict* d = obj->u.object_val;
-        ely_value* method = dict_get_str(d, (char*)method_name);
-        if (method && method->type == ely_VALUE_FUNCTION) {
-            if (method->u.function.is_native)
-                return ely_invoke(method->u.function.func_ptr, args, argc);
-            else
-                return ely_value_new_null();
-        }
-        if (strcmp(method_name, "keys") == 0 && argc == 0)
-            return ely_dict_keys(obj);
-        else if (strcmp(method_name, "values") == 0 && argc == 0)
-            return ely_value_new_array(dict_values(d));
-        else if (strcmp(method_name, "has") == 0 && argc == 1)
-            return ely_value_new_bool(dict_has(d, args[0]));
-        else if (strcmp(method_name, "del") == 0 && argc == 1) {
-            int res = dict_delete(d, args[0]);
-            return ely_value_new_int(res);
-        }
-        else if (strcmp(method_name, "size") == 0 && argc == 0)
-            return ely_value_new_int(dict_size(d));
-    }
-
-    else if (obj->type == ely_VALUE_FUNCTION) {
-        if (obj->u.function.is_native)
-            return ely_invoke(obj->u.function.func_ptr, args, argc);
     }
 
     return ely_value_new_null();
