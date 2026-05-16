@@ -108,7 +108,6 @@ class ProjectBuilder:
         if not sources:
             return False
 
-        # Парсинг и анализ
         all_statements = []
         for src in sources:
             with open(src, 'r', encoding='utf-8') as f:
@@ -217,13 +216,61 @@ class ProjectBuilder:
         return False
 
     def _collect_sources(self) -> list:
-        sources = []
+        """Рекурсивно собирает все .ely файлы, начиная с главного."""
         main_file = self.config.get('enter')
-        if main_file:
-            main_path = (self.project_root / main_file).resolve()
-            if main_path.exists() and main_path.is_file():
-                sources.append(main_path)
-        return sources
+        if not main_file:
+            print("Error: 'enter' not specified in manager.json")
+            return []
+        main_path = (self.project_root / main_file).resolve()
+        if not main_path.exists() or not main_path.is_file():
+            print(f"Error: main file not found: {main_path}")
+            return []
+
+        collected = {}
+        pending = [main_path]
+
+        while pending:
+            current = pending.pop()
+            abs_path = current.resolve()
+            if abs_path in collected:
+                continue
+            collected[abs_path] = current  # сохраняем относительный путь для диагностики
+
+            with open(abs_path, 'r', encoding='utf-8') as f:
+                source = f.read()
+
+            lexer = Lexer(source)
+            parser = Parser(lexer)
+            prog = parser.parse()
+            if parser.errors:
+                for err in parser.errors:
+                    print(err)
+                return []
+
+            # Ищем using "файл.ely" в утверждениях
+            for stmt in prog.statements:
+                if isinstance(stmt, UsingDirective):
+                    module = stmt.module
+                    # Если это строка с кавычками, берём значение (уже без кавычек)
+                    if module.startswith('"') and module.endswith('"'):
+                        module = module[1:-1]
+                    # Если это идентификатор, ищем в конфиге modules
+                    elif module not in ('"', '') and not module.startswith('"'):
+                        # Возможно, это имя из manager.json
+                        modules_config = self.config.get('modules', {})
+                        if module in modules_config:
+                            module = modules_config[module]
+                        else:
+                            print(f"Warning: module '{module}' not found in manager.json")
+                            continue
+                    # Разрешаем путь относительно текущего файла
+                    candidate = (abs_path.parent / module).resolve()
+                    if candidate.exists():
+                        pending.append(candidate)
+                    else:
+                        print(f"Warning: module file not found: {candidate}")
+
+        return list(collected.keys())
 
     def _show_semantic_errors(self, errors):
         RED, BOLD, RESET = '\033[91m', '\033[1m', '\033[0m'

@@ -252,11 +252,17 @@ class Parser:
         if self._match(TokenType.USING):
             line = self.current_token.line if self.current_token else 0
             col = self.current_token.col if self.current_token else 0
-            if not self._check(TokenType.IDENTIFIER):
-                self._error("Expected module name after 'using'")
+            module = None
+            if self._check(TokenType.IDENTIFIER):
+                module = self.current_token.lexeme
+                self._advance()
+            elif self._check(TokenType.STRING):
+                # value уже содержит раскрытую строку без кавычек
+                module = self.current_token.value
+                self._advance()
+            else:
+                self._error("Expected module name or string after 'using'")
                 return None
-            module = self.current_token.lexeme
-            self._advance()
             if self._consume(TokenType.SEMICOLON, "Expected ';' after using") is None:
                 return None
             return UsingDirective(line=line, col=col, module=module)
