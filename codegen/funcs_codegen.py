@@ -271,7 +271,19 @@ class FuncCodeGen(CodeGenUtils):
         if name in self.global_types:
             return name
         if name in self.var_types:
-            return name
+            t = self.var_types[name]
+            if t in ('int','uint','more','umore','byte','ubyte'):
+                return f"ely_value_new_int({name})"
+            elif t in ('flt','double'):
+                return f"ely_value_new_double({name})"
+            elif t == 'bool':
+                return f"ely_value_new_bool({name})"
+            elif t == 'str':
+                return f"ely_value_new_string({name})"
+            elif t in self.classes_ast:
+                return name
+            else:
+                return name
 
         # Для необъявленных идентификаторов — динамическая переменная
         self.ensure_identifier(name, node.line, node.col)
@@ -398,6 +410,16 @@ class FuncCodeGen(CodeGenUtils):
         obj_code = self.gen_expression(node.object)
         obj_type = self.get_expression_type(node.object)
 
+        # Если obj_code совпадает с именем namespace?
+        ns_name = obj_code
+        if ns_name in self.namespaces:
+            ns_members = self.namespaces[ns_name]
+            if node.member in ns_members:
+                return ns_members[node.member]   # уже содержит префикс (например, "MyNS_MyClass")
+            else:
+                self.error(f"Namespace '{ns_name}' has no member '{node.member}'", node)
+                return "ely_value_new_null()"
+
         # Если объект — имя класса (obj_type — класс)
         if obj_type in self.classes_ast:
             cls = self.classes_ast[obj_type]
@@ -405,11 +427,11 @@ class FuncCodeGen(CodeGenUtils):
             for sf in cls.static_fields:
                 if sf.name == node.member:
                     return f"{obj_type}::{sf.name}"
-            # Статические методы (если нужен доступ к ним как к полю — редко)
+            # Статические методы
             for sm in cls.static_methods:
                 if sm.name == node.member:
                     return f"{obj_type}::{sm.name}"
-            # Поля экземпляра — если obj_code — экземпляр, то обращаемся через ->
+            # Поля экземпляра
             if self._is_field_in_hierarchy(cls, node.member):
                 field_type = self._get_field_type_in_hierarchy(cls, node.member)
                 if field_type == 'str':
@@ -422,8 +444,15 @@ class FuncCodeGen(CodeGenUtils):
                     return f"ely_value_new_bool({obj_code}->{node.member})"
                 else:
                     return f"{obj_code}->{node.member}"
+            self.error(f"Class '{obj_type}' has no member '{node.member}'", node)
+            return "ely_value_new_null()"
 
-        # Для не-классов — общий доступ через ключ
+        # Встроенные типы
+        if obj_type.startswith('arr<') or obj_type.startswith('dict<') or obj_type == 'str' or obj_type in ('int','uint','more','umore','flt','double'):
+            # для них используем общий доступ через ключ
+            return f"ely_value_get_key({obj_code}, \"{node.member}\")"
+
+        # any
         return f"ely_value_get_key({obj_code}, \"{node.member}\")"
 
     def _is_field_in_hierarchy(self, cls: ClassDeclaration, field: str) -> bool:
@@ -960,6 +989,10 @@ class FuncCodeGen(CodeGenUtils):
             return f"ely_value_new_bool({call_expr})"
         if return_type == 'str':
             return f"ely_value_new_string({call_expr})"
+        if return_type in ('object', 'dict'):
+            return f"ely_value_new_object({call_expr})"
+        if return_type == 'array' or return_type.startswith('arr<'):
+            return f"ely_value_new_array({call_expr})"
         return call_expr
 
     # -------------------------------------------------------------------

@@ -26,6 +26,8 @@ class CodeGenUtils:
         self.current_namespace: Optional[str] = None
         self.classes_ast: Dict[str, ClassDeclaration] = {}
         self.structs: set = set()
+        self.namespaces: Dict[str, Dict[str, str]] = {}
+        self.imported_namespaces: Dict[str, str] = {}
 
     # --- scopes ---
     def push_scope(self):
