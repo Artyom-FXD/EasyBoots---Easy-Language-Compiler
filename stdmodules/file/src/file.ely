@@ -1,0 +1,12 @@
+public class File {
+    wait str path;
+
+    public bool func exist() { return fileExists(path); }
+    public str func getContent() { return fileReadAll(path); }
+    public void func setContent(str value) { fileWriteAll(path, value); }
+    public void func rename(str newPath) {
+        fileRename(path, newPath);
+        path = newPath;
+    }
+    public void func remove() { fileRemove(path); }
+}

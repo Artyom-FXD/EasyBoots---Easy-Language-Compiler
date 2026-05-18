@@ -1,0 +1,16 @@
+{
+    "name": "file",
+    "version": "1.0.0",
+    "language_version": ">=26.4",
+    "description": "File system operations",
+    "author": "ElySpruce authors",
+    "license": "LICENSE",
+    "modules": {
+        "file": "src/file.ely"
+    },
+    "include": [
+        "src/file.ely",
+        "elymodule.json",
+        "LICENSE"
+    ]
+}
