@@ -573,6 +573,19 @@ class ProjectBuilder:
         collected = {}
         pending = [main_path]
 
+        # Добавляем все модули из поля 'modules' в manager.json (даже без using)
+        modules_config = self.config.get('modules', {})
+        for module_name, module_path in modules_config.items():
+            candidate = (self.project_root / module_path).resolve()
+            if candidate.exists():
+                pending.append(candidate)
+            else:
+                pkg_candidate = self._resolve_package_module(module_path)
+                if pkg_candidate:
+                    pending.append(pkg_candidate)
+                else:
+                    print(f"  {TC.tag('WARN')} Module '{module_name}' not found at: {candidate}")
+
         while pending:
             current = pending.pop()
             abs_path = current.resolve()

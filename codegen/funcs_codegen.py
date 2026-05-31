@@ -417,6 +417,10 @@ class FuncCodeGen(CodeGenUtils):
         if func_name.endswith('_constructor'):
             return self._gen_constructor_call(node, func_name)
 
+        # Прямой вызов конструктора класса (например, File("path"))
+        if func_name in self.classes_ast:
+            return self._gen_constructor_call(node, func_name + '_constructor')
+
         # Старые статические методы (ClassName_method)
         if '_' in func_name and not func_name.startswith('__'):
             parts = func_name.split('_', 1)
