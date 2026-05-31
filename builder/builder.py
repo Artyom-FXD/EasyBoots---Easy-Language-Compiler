@@ -263,6 +263,86 @@ class ProjectBuilder:
         opt_str = {'none': 'off', 'soft': 'light (O1)', 'hard': 'full (O2)'}.get(self.optimization, self.optimization)
         print(f"  {dim}Optimization:{rst} {opt_str}  {dim}Debug:{rst} {'on' if self.debug else 'off'}")
 
+    def build_module(self, module_name: str) -> bool:
+        """
+        Build a named module from stdmodules/<name>/manager.json or modules/<name>.ely.
+
+        :param module_name: Name of the module to build.
+        :returns: True if the build succeeded, False otherwise.
+
+        Собирает модуль по имени из stdmodules/<name>/manager.json.
+        :param module_name: Имя модуля для сборки.
+        :returns: True, если сборка прошла успешно, иначе False.
+        """
+        # 1. Пробуем найти stdmodules/<name>/manager.json
+        stdmodule_config = Path(__file__).parent.parent / 'stdmodules' / module_name / 'manager.json'
+        if stdmodule_config.exists():
+            builder = ProjectBuilder(stdmodule_config,
+                                     compiler_path=self.compiler_path,
+                                     young_mb=self.gc_young_mb,
+                                     old_mb=self.gc_old_mb,
+                                     target=self.target)
+            builder.optimization = self.optimization
+            builder.debug = self.debug
+            builder.force_rebuild = self.force_rebuild
+            return builder.build()
+
+        # 2. Пробуем modules/<name>.ely (одиночный файл-модуль)
+        modules_config = self.config.get('modules', {})
+        if module_name in modules_config:
+            module_path = self.project_root / modules_config[module_name]
+            if module_path.exists():
+                # Создаём временный конфиг для одиночного файла
+                temp_config = {
+                    "name": module_name,
+                    "version": "1.0.0",
+                    "stx": {"processType": "module"},
+                    "output": {
+                        "libmain": str(module_path.relative_to(self.project_root)),
+                        "native": False,
+                        "nativeSources": [],
+                        "elyfile": []
+                    }
+                }
+                builder = ProjectBuilder.from_config(temp_config, self.project_root,
+                                                     compiler_path=self.compiler_path,
+                                                     young_mb=self.gc_young_mb,
+                                                     old_mb=self.gc_old_mb,
+                                                     target=self.target)
+                builder.optimization = self.optimization
+                builder.debug = self.debug
+                builder.force_rebuild = self.force_rebuild
+                return builder.build()
+
+        print(f"\n{TC.tag('ERROR')} Module '{module_name}' not found")
+        return False
+
+    @classmethod
+    def from_config(cls, config: dict, project_root: Path,
+                    compiler_path=None, young_mb=None, old_mb=None, target=None):
+        """
+        Create a ProjectBuilder from an in-memory config dictionary.
+        Used for temporary module builds without a manager.json file.
+
+        Создаёт ProjectBuilder из словаря конфигурации в памяти.
+        Используется для временной сборки модулей без manager.json.
+        """
+        import tempfile
+        # Create a temporary manager.json
+        tmp_dir = Path(tempfile.mkdtemp(prefix='elybuild_'))
+        tmp_config = tmp_dir / 'manager.json'
+        with open(tmp_config, 'w', encoding='utf-8') as f:
+            json.dump(config, f)
+        builder = cls(tmp_config, compiler_path=compiler_path,
+                      young_mb=young_mb, old_mb=old_mb, target=target)
+        # Override project_root and fix derived paths
+        builder._project_root_override = project_root
+        builder.build_dir = project_root / 'build'
+        builder.output_dir = project_root / 'output'
+        builder.libs_dir = project_root / 'libs'
+        builder.cache_path = builder.build_dir / 'cache.json'
+        return builder
+
     def build(self) -> bool:
         """
         Execute the full build pipeline: parse, analyse, generate, compile, and link.
@@ -272,6 +352,12 @@ class ProjectBuilder:
         Выполняет полный цикл сборки: разбор, анализ, генерацию, компиляцию и компоновку.
         :returns: True, если сборка прошла успешно, иначе False.
         """
+        # Определяем processType
+        process_type = self.config.get('stx', {}).get('processType', 'console')
+
+        if process_type == 'module':
+            return self._build_module()
+
         # ===== 1. Подготовка рантайма =====
         if not self._prepare_runtime():
             return False
@@ -521,7 +607,12 @@ class ProjectBuilder:
                     if candidate.exists():
                         pending.append(candidate)
                     else:
-                        print(f"  {TC.tag('WARN')} Module file not found: {candidate}")
+                        # Попробовать найти как пакет в ely_packages/
+                        pkg_candidate = self._resolve_package_module(module)
+                        if pkg_candidate:
+                            pending.append(pkg_candidate)
+                        else:
+                            print(f"  {TC.tag('WARN')} Module file not found: {candidate}")
 
         return list(collected.keys())
 
@@ -574,6 +665,354 @@ class ProjectBuilder:
                 print(f"  {TC.RED}{TC.BOLD}{err_str}{TC.RESET}")
         print()
 
+    # ==================================================================
+    # Module build pipeline (processType = "module")
+    # ==================================================================
+
+    def _build_module(self) -> bool:
+        """
+        Build a module package: parse libmain, generate C++ code, compile to
+        static library (.lib/.a), generate link.ely wrapper, .h header,
+        elymodule.json, and copy elyfile assets into output/<name>/.
+        """
+        name = self.config.get('name', 'module')
+        out_cfg = self.config.get('output', {})
+        native = out_cfg.get('native', True)
+        libmain_rel = out_cfg.get('libmain', 'src/lib.ely')
+        elyfile_list = out_cfg.get('elyfile', [])
+        native_sources = out_cfg.get('nativeSources', [])
+
+        output_pkg_dir = self.output_dir / name
+        output_lib_dir = output_pkg_dir / 'lib'
+        output_include_dir = output_pkg_dir / 'include'
+        output_ely_dir = output_pkg_dir / 'ely'
+
+        # Убеждаемся, что все нужные папки существуют
+        output_pkg_dir.mkdir(parents=True, exist_ok=True)
+        self.build_dir.mkdir(parents=True, exist_ok=True)
+
+        # ----- 1. Собрать исходники из libmain -----
+        libmain_path = (self.project_root / libmain_rel).resolve()
+        if not libmain_path.exists():
+            print(f"\n{TC.tag('ERROR')} libmain not found: {libmain_path}")
+            return False
+
+        sources = self._collect_module_sources(libmain_path)
+        if not sources:
+            return False
+
+        print(f"\n{TC.BOLD}{TC.WHITE}  Module: {name}{TC.RESET}")
+        print(f"  {TC.DIM}libmain:{TC.RESET} {libmain_rel}")
+        print(f"  {TC.DIM}Source files:{TC.RESET} {len(sources)}")
+        print(f"  {TC.DIM}Native:{TC.RESET} {'yes' if native else 'no'}")
+        print(f"  {TC.DIM}Output:{TC.RESET} {output_pkg_dir}/")
+
+        # ----- 1.5 Подготовка рантайма (нужны хедеры для компиляции) -----
+        if not self._prepare_runtime():
+            return False
+
+        # ----- 2. Парсинг + семантика -----
+        print(f"\n{TC.tag('BUILD')} Parsing module sources...")
+        all_statements = []
+        parser_errors_occurred = False
+        for src in sources:
+            with open(src, 'r', encoding='utf-8') as f:
+                source_text = f.read()
+            lexer = Lexer(source_text)
+            parser = Parser(lexer)
+            prog = parser.parse()
+            if parser.errors:
+                parser_errors_occurred = True
+                self._show_parser_errors(src, source_text, parser.errors)
+            if prog:
+                all_statements.extend(prog.statements)
+        if parser_errors_occurred:
+            return False
+
+        sem = SemanticAnalyzer()
+        errors = sem.analyze(Program(all_statements))
+        if errors:
+            self._show_semantic_errors(errors)
+            return False
+        print(f"  {TC.tag('OK')} Semantic analysis passed")
+
+        # ----- 3. Извлечь публичные символы -----
+        public_funcs = self._extract_public_functions(all_statements)
+        pub_names = [f[0] for f in public_funcs]
+        print(f"  {TC.tag('OK')} Public exports: {', '.join(pub_names) if pub_names else '(none)'}")
+
+        # ----- 4. Генерация C++ кода -----
+        cpp_file = self.build_dir / 'output.cpp'
+        codegen = CppCodeGen(debug=self.debug)
+        cpp_code = codegen.generate(Program(all_statements))
+        cpp_file.write_text(cpp_code, encoding='utf-8')
+        print(f"  {TC.tag('OK')} C++ code generated -> {cpp_file.name}")
+
+        # ----- 5. Поиск компилятора -----
+        print(f"\n{TC.tag('INFO')} Searching for C++ compiler...")
+        compiler, comp_path, extra_flags = self._find_compiler()
+        if not compiler:
+            print(f"\n{TC.tag('ERROR')} No C++ compiler found.")
+            return False
+        print(f"  {TC.tag('OK')} Using {compiler} -> {comp_path}")
+
+        # Убеждаемся, что g++ есть
+        if compiler == 'gcc':
+            gcc_path = Path(comp_path)
+            if gcc_path.name == 'gcc.exe' or gcc_path.name == 'gcc':
+                self._ensure_gpp(gcc_path)
+                compiler = 'g++'
+                comp_path = str(gcc_path.with_name('g++.exe' if sys.platform == 'win32' else 'g++'))
+
+        # ----- 6. Компиляция output.cpp -> output.o -----
+        main_obj = self.build_dir / 'output.o'
+        print(f"\n{TC.tag('BUILD')} Compiling {cpp_file.name} -> {main_obj.name}...")
+        cmd = [comp_path, '-c', str(cpp_file), '-o', str(main_obj)]
+        if self.optimization == 'hard':
+            cmd.append('-O2')
+        elif self.optimization == 'soft':
+            cmd.append('-O1')
+        if self.debug:
+            cmd.append('-g')
+        cmd.append(f'-I{self.build_dir}/runtime')
+        cmd.append('-fexceptions')
+        cmd.append('-std=c++20')
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"  {TC.tag('OK')} Compilation succeeded")
+        except subprocess.CalledProcessError as e:
+            print(f"\n{TC.tag('ERROR')} C++ compilation failed")
+            self._show_compiler_error(e.stderr, str(cpp_file))
+            return False
+
+        # ----- 6.5 Компиляция native C-файлов -----
+        native_objs = []
+        if native and native_sources:
+            print(f"\n{TC.tag('BUILD')} Compiling native sources ({len(native_sources)} files)...")
+            for rel_path in native_sources:
+                src_path = (self.project_root / rel_path).resolve()
+                if not src_path.exists():
+                    print(f"  {TC.tag('WARN')} Native source not found: {rel_path}")
+                    continue
+                obj_path = self.build_dir / (src_path.stem + '.o')
+                # Определяем язык по расширению
+                is_cpp = src_path.suffix in ('.cpp', '.cxx', '.cc')
+                ncmd = [comp_path, '-c', str(src_path), '-o', str(obj_path)]
+                if not is_cpp and compiler in ('g++', 'c++'):
+                    ncmd.insert(1, '-x')
+                    ncmd.insert(2, 'c')
+                if self.optimization == 'hard':
+                    ncmd.append('-O2')
+                ncmd.append(f'-I{self.build_dir}/runtime')
+                ncmd.append(f'-I{self.project_root}/src')
+                if is_cpp:
+                    ncmd.append('-std=c++20')
+                try:
+                    subprocess.run(ncmd, check=True, capture_output=True, text=True)
+                    native_objs.append(obj_path)
+                    print(f"  {TC.tag('OK')} {rel_path} -> {obj_path.name}")
+                except subprocess.CalledProcessError as e:
+                    print(f"\n{TC.tag('ERROR')} Native compilation failed: {rel_path}")
+                    self._show_compiler_error(e.stderr, str(src_path))
+                    return False
+
+        # ----- 7. Статическая библиотека (.lib / .a) -----
+        if native:
+            output_lib_dir.mkdir(parents=True, exist_ok=True)
+            lib_file = output_lib_dir / f'{name}.lib'
+            print(f"\n{TC.tag('BUILD')} Creating static library {lib_file.name}...")
+            # ar rcs на mingw — собираем все объектные файлы
+            all_objs_for_lib = [main_obj] + native_objs
+            ar_exe = Path(comp_path).with_name('ar.exe')
+            if not ar_exe.exists():
+                ar_exe = shutil.which('ar')
+                if not ar_exe:
+                    print(f"  {TC.tag('WARN')} ar.exe not found, skipping static library. Copying .o instead.")
+                    shutil.copy2(main_obj, lib_file.with_suffix('.o'))
+                else:
+                    ar_exe = Path(ar_exe)
+            if ar_exe and ar_exe.exists():
+                try:
+                    ar_cmd = [str(ar_exe), 'rcs', str(lib_file)] + [str(o) for o in all_objs_for_lib]
+                    subprocess.run(ar_cmd, check=True, capture_output=True, text=True)
+                    print(f"  {TC.tag('OK')} Static library created: {lib_file}")
+                except subprocess.CalledProcessError as e:
+                    print(f"  {TC.tag('WARN')} ar failed: {e.stderr}. Copying .o instead.")
+                    shutil.copy2(main_obj, lib_file.with_suffix('.o'))
+            else:
+                shutil.copy2(main_obj, lib_file.with_suffix('.o'))
+
+            # ----- 8. Генерация .h заголовка -----
+            output_include_dir.mkdir(parents=True, exist_ok=True)
+            h_file = output_include_dir / f'{name}.h'
+            print(f"  {TC.tag('BUILD')} Generating {h_file.name}...")
+            with open(h_file, 'w', encoding='utf-8') as hf:
+                hf.write(f"// Auto-generated header for module {name}\n")
+                hf.write(f"#ifndef ELY_MODULE_{name.upper()}_H\n")
+                hf.write(f"#define ELY_MODULE_{name.upper()}_H\n\n")
+                hf.write('#include "ely_runtime.h"\n\n')
+                for func_name, ret_type, params in public_funcs:
+                    c_ret = self._ely_to_c_type(ret_type)
+                    c_params = ', '.join([f"{self._ely_to_c_type(pt)} {pn}" for pt, pn in params])
+                    hf.write(f"extern {c_ret} {func_name}({c_params});\n")
+                hf.write("\n#endif\n")
+            print(f"  {TC.tag('OK')} Header generated: {h_file}")
+
+        # ----- 9. Генерация link.ely -----
+        link_file = output_pkg_dir / 'link.ely'
+        print(f"\n{TC.tag('BUILD')} Generating link.ely wrapper...")
+        with open(link_file, 'w', encoding='utf-8') as lf:
+            lf.write(f"// Auto-generated link wrapper for module {name}\n")
+            lf.write(f"// language_version: 26.5\n")
+            lf.write(f"// Do not edit manually.\n\n")
+            for func_name, ret_type, params in public_funcs:
+                param_str = ', '.join([f"{pt} {pn}" for pt, pn in params])
+                lf.write(f"public extern {ret_type} {func_name}({param_str});\n")
+        print(f"  {TC.tag('OK')} link.ely -> {link_file}")
+
+        # ----- 10. Копирование elyfile -----
+        if elyfile_list:
+            output_ely_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\n{TC.tag('INFO')} Copying elyfile assets...")
+            for rel_path in elyfile_list:
+                src_path = (self.project_root / rel_path).resolve()
+                dst_path = output_ely_dir / Path(rel_path).name
+                if src_path.exists():
+                    shutil.copy2(src_path, dst_path)
+                    print(f"  {TC.tag('OK')} {rel_path} -> {dst_path}")
+                else:
+                    print(f"  {TC.tag('WARN')} elyfile not found: {rel_path}")
+
+        # ----- 11. Генерация elymodule.json -----
+        print(f"\n{TC.tag('BUILD')} Generating elymodule.json...")
+        include_files = ['link.ely', 'elymodule.json']
+        if native:
+            include_files.append(f'lib/{name}.lib')
+            include_files.append(f'include/{name}.h')
+        for rel in elyfile_list:
+            include_files.append(f'ely/{Path(rel).name}')
+        elymodule = {
+            "name": name,
+            "version": self.config.get('version', '0.1.0'),
+            "language_version": "26.5",
+            "stx": {"processType": "module"},
+            "description": self.config.get('description', ''),
+            "author": self.config.get('author', ''),
+            "linkfile": "link.ely",
+            "exports": pub_names,
+            "include": include_files
+        }
+        elymodule_path = output_pkg_dir / 'elymodule.json'
+        with open(elymodule_path, 'w', encoding='utf-8') as ef:
+            json.dump(elymodule, ef, indent=4)
+        print(f"  {TC.tag('OK')} elymodule.json -> {elymodule_path}")
+
+        print(f"\n  {TC.GREEN}{TC.BOLD}BUILD SUCCESS{TC.RESET}")
+        print(f"  {TC.BOLD}{TC.WHITE}Module:{TC.RESET} {output_pkg_dir}/")
+        self.output_name = str(output_pkg_dir)
+        return True
+
+    # ------------------------------------------------------------------
+    # Module helper methods
+    # ------------------------------------------------------------------
+
+    def _collect_module_sources(self, libmain_path: Path) -> list:
+        """Collect all .ely files reachable from libmain via `using` directives."""
+        collected = {}
+        pending = [libmain_path]
+
+        while pending:
+            current = pending.pop()
+            abs_path = current.resolve()
+            if abs_path in collected:
+                continue
+            if not abs_path.exists():
+                print(f"  {TC.tag('WARN')} File not found: {abs_path}")
+                continue
+            collected[abs_path] = current
+
+            with open(abs_path, 'r', encoding='utf-8') as f:
+                source = f.read()
+
+            lexer = Lexer(source)
+            parser = Parser(lexer)
+            prog = parser.parse()
+            if parser.errors:
+                for err in parser.errors:
+                    print(f"{TC.YELLOW}{TC.BOLD}  {err}{TC.RESET}")
+                return []
+
+            for stmt in prog.statements:
+                if isinstance(stmt, UsingDirective):
+                    module = stmt.module
+                    if module.startswith('"') and module.endswith('"'):
+                        module = module[1:-1]
+                    elif module not in ('"', '') and not module.startswith('"'):
+                        modules_config = self.config.get('modules', {})
+                        if module in modules_config:
+                            module = modules_config[module]
+                        else:
+                            print(f"  {TC.tag('WARN')} Module '{module}' not found in manager.json")
+                            continue
+                    candidate = (abs_path.parent / module).resolve()
+                    if candidate.exists():
+                        pending.append(candidate)
+                    else:
+                        # Попробовать найти как путь к elymodule.json пакета
+                        pkg_candidate = self._resolve_package_module(module)
+                        if pkg_candidate:
+                            pending.append(pkg_candidate)
+                        else:
+                            print(f"  {TC.tag('WARN')} Module file not found: {candidate}")
+
+        return list(collected.keys())
+
+    def _resolve_package_module(self, module_name: str) -> Optional[Path]:
+        """Try to find a module in ely_packages/."""
+        pkg_dir = self.project_root / 'ely_packages' / module_name
+        if pkg_dir.exists():
+            elymodule_json = pkg_dir / 'elymodule.json'
+            if elymodule_json.exists():
+                with open(elymodule_json, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                linkfile = meta.get('linkfile', 'link.ely')
+                link_path = pkg_dir / linkfile
+                if link_path.exists():
+                    return link_path
+        return None
+
+    def _extract_public_functions(self, statements: list) -> list:
+        """Extract (name, return_type, [(param_type, param_name), ...]) from public methods."""
+        result = []
+        for stmt in statements:
+            if isinstance(stmt, MethodDeclaration) and stmt.modifier == 'public':
+                params = [(p.type, p.name) for p in stmt.parameters]
+                result.append((stmt.name, stmt.return_type or 'void', params))
+        return result
+
+    @staticmethod
+    def _ely_to_c_type(ely_type: str) -> str:
+        """Convert Ely type name to C type for .h generation."""
+        mapping = {
+            'void': 'void',
+            'int': 'int',
+            'uint': 'unsigned int',
+            'more': 'long long',
+            'umore': 'unsigned long long',
+            'flt': 'float',
+            'double': 'double',
+            'bool': 'int',
+            'str': 'char*',
+            'any': 'void*',
+            'char': 'char',
+            'byte': 'signed char',
+            'ubyte': 'unsigned char'
+        }
+        return mapping.get(ely_type, 'int')
+
+    # ------------------------------------------------------------------
+    # Static compiler error display
+    # ------------------------------------------------------------------
     @staticmethod
     def _show_compiler_error(stderr_text: str, context_hint: str = ''):
         """Print C/C++ compiler/linker errors with highlighted keywords."""

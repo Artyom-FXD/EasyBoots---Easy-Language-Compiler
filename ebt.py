@@ -44,6 +44,8 @@ def main():
     # project
     proj_parser = subparsers.add_parser('project', help='Create new project')
     proj_parser.add_argument('name', nargs='?', default='new_project')
+    proj_parser.add_argument('--type', dest='project_type', choices=['console', 'module', 'process'], default='console',
+                             help='Project type: console, module, or process')
     
     # Новая команда install-compiler
     install_parser = subparsers.add_parser('install-compiler', help='Manage GCC compiler installation')
@@ -161,22 +163,61 @@ def clean_command(args):
                 print(f"Removed {f}")
 
 def project_command(args):
+    ptype = args.project_type
     project_dir = Path(args.name).resolve()
     if project_dir.exists():
         print(f"Directory {project_dir} already exists.")
         return 1
     project_dir.mkdir(parents=True)
-    # manager.json
+
+    # --- manager.json ---
     manager = {
         "name": args.name,
+        "version": "0.1.0",
+        "stx": {"processType": ptype},
         "modules": {},
+        "dependencies": {},
         "enter": "main.ely",
-        "output": {"enter": {"name": f"{args.name}.exe", "type": "exe"}}
+        "output": {
+            "enter": {"name": f"{args.name}.exe", "type": "exe" if ptype != "module" else "module"}
+        }
     }
+    if ptype == "module":
+        manager["output"]["libmain"] = "src/lib.ely"
+        manager["output"]["native"] = True
+        manager["output"]["nativeSources"] = []
+        manager["output"]["elyfile"] = ["src/lib.ely", "LICENSE"]
     (project_dir / 'manager.json').write_text(json.dumps(manager, indent=4), encoding='utf-8')
 
-    # main.ely
-    (project_dir / 'main.ely').write_text("""public int func main() {
+    # --- elymodule.json (только для module) ---
+    if ptype == "module":
+        elymodule = {
+            "name": args.name,
+            "version": "0.1.0",
+            "language_version": ">=26.5",
+            "description": "",
+            "author": "",
+            "license": "MIT",
+            "stx": {"processType": "module"},
+            "output": {
+                "libmain": "src/lib.ely",
+                "native": True,
+                "nativeSources": [],
+                "elyfile": ["src/lib.ely", "LICENSE"]
+            },
+            "include": ["src/lib.ely", "elymodule.json", "LICENSE"]
+        }
+        (project_dir / 'elymodule.json').write_text(json.dumps(elymodule, indent=4), encoding='utf-8')
+        (project_dir / 'src').mkdir(parents=True)
+        (project_dir / 'src' / 'lib.ely').write_text("""// Module entry point — public API
+public int func hello() {
+    println("Hello from module!");
+    return 0;
+}
+""", encoding='utf-8')
+    else:
+        # main.ely (для console / process)
+        (project_dir / 'main.ely').write_text("""public int func main() {
     println("Hello from ely!");
     return 0;
 }
@@ -190,7 +231,7 @@ def project_command(args):
         print(f"Runtime copied to {runtime_dst}")
     else:
         print("Warning: runtime not found. Copy manually.")
-    print(f"Project created at {project_dir}")
+    print(f"Project '{args.name}' created ({ptype}) at {project_dir}")
     return 0
 
 def install_compiler_command(args):

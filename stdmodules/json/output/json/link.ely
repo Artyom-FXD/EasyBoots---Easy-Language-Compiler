@@ -1,0 +1,7 @@
+// Auto-generated link wrapper for module json
+// language_version: 26.5
+// Do not edit manually.
+
+public extern any json_parse_str_wrapper(str s);
+public extern bool json_is_valid_wrapper(str s);
+public extern str json_stringify(any value);

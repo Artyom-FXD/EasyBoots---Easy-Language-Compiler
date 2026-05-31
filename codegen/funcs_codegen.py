@@ -636,10 +636,8 @@ class FuncCodeGen(CodeGenUtils):
 
         # Обработка вызовов методов из пространств имён
         if obj_type.startswith('namespace_'):
-            # Для пространств имён вызываем глобальную функцию вида Namespace_Class_method
+            # Вызываем статический метод напрямую: ClassName::method(...)
             namespace_class = obj_type[len('namespace_'):]
-            func_name = f"{obj_code.code}_{method}"
-            # Находим класс и его статический метод
             if namespace_class in self.classes_ast:
                 cls = self.classes_ast[namespace_class]
                 for sm in cls.static_methods:
@@ -649,8 +647,8 @@ class FuncCodeGen(CodeGenUtils):
                             if i < len(sm.parameters):
                                 expected = self.type_to_cpp(sm.parameters[i].type, is_param=True)
                                 args[i] = self.ensure_type(args[i], expected)
-                        ret_raw = self.type_to_cpp(sm.return_type or 'any', is_param=True)
-                        return ExprCode(f"{func_name}({', '.join(a.code for a in args)})", ret_raw, sm.return_type or 'any')
+                        ret_raw = self.type_to_cpp(sm.return_type or 'any', for_signature=True)
+                        return ExprCode(f"{namespace_class}::{sm.name}({', '.join(a.code for a in args)})", ret_raw, sm.return_type or 'any')
             self.error(f"Namespace class '{namespace_class}' not found or has no static method '{method}'", node)
             return ExprCode("ely_value_new_null()", "ely_value*", "any")
 

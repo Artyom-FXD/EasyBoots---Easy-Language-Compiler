@@ -1,0 +1,31 @@
+{
+    "name": "json",
+    "version": "1.0.0",
+    "language_version": ">=26.5",
+    "description": "JSON parsing and serialization — extends File with JSON read/write capabilities. Pure Ely implementation with recursive descent parser.",
+    "author": "ElySpruce authors",
+    "license": "MIT",
+    "stx": {
+        "processType": "module"
+    },
+    "output": {
+        "libmain": "src/json.ely",
+        "native": false,
+        "nativeSources": [],
+        "elyfile": [
+            "src/json.ely",
+            "LICENSE"
+        ]
+    },
+    "dependencies": {
+        "file": ">=1.0.0"
+    },
+    "modules": {
+        "file": "../file/src/file.ely"
+    },
+    "include": [
+        "src/json.ely",
+        "elymodule.json",
+        "LICENSE"
+    ]
+}

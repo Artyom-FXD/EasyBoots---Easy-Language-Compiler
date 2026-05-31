@@ -1,0 +1,8 @@
+// Auto-generated link wrapper for module file
+// language_version: 26.5
+// Do not edit manually.
+
+public extern str pathJoin(str a, str b);
+public extern str pathBasename(str p);
+public extern str pathDirname(str p);
+public extern bool pathIsAbsolute(str p);

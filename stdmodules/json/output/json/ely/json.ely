@@ -1,0 +1,50 @@
+// ================================================================
+//  json.ely — JSON module (native backend)
+// ================================================================
+
+// ------------------------------------------------------------------
+// Forward-декларации нативных функций (парсятся из cCode)
+// ------------------------------------------------------------------
+cCode {
+    char* json_parse_str(char* s);
+    char* json_value_to_str(void* value);
+    int json_is_valid(char* s);
+}
+
+// ------------------------------------------------------------------
+// Класс JSON — использует нативный парсер
+// ------------------------------------------------------------------
+public class JSON {
+    wait str content;
+
+    // ----- Парсинг JSON из строки -----
+    public any func parse() {
+        return json_parse_str(content);
+    }
+
+    // ----- Проверка валидности JSON -----
+    public bool func isValid() {
+        return json_is_valid(content);
+    }
+
+    // ----- Сериализация в строку -----
+    public str func stringify(any value) {
+        return json_value_to_str(value);
+    }
+}
+
+// ------------------------------------------------------------------
+// Глобальные утилиты
+// ------------------------------------------------------------------
+
+public any func json_parse_str_wrapper(str s) {
+    return json_parse_str(s);
+}
+
+public bool func json_is_valid_wrapper(str s) {
+    return json_is_valid(s);
+}
+
+public str func json_stringify(any value) {
+    return json_value_to_str(value);
+}

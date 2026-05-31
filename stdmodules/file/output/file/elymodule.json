@@ -1,0 +1,25 @@
+{
+    "name": "file",
+    "version": "1.0.0",
+    "language_version": "26.5",
+    "stx": {
+        "processType": "module"
+    },
+    "description": "",
+    "author": "",
+    "linkfile": "link.ely",
+    "exports": [
+        "pathJoin",
+        "pathBasename",
+        "pathDirname",
+        "pathIsAbsolute"
+    ],
+    "include": [
+        "link.ely",
+        "elymodule.json",
+        "lib/file.lib",
+        "include/file.h",
+        "ely/file.ely",
+        "ely/elymodule.json"
+    ]
+}

@@ -233,8 +233,27 @@ class CppCodeGen(ClassCodeGen):
             elif isinstance(stmt, GlobalCBlock):
                 self.global_code.append(stmt.code)
                 import re
-                pattern = re.compile(r'\b([a-zA-Z_]\w*[\s\*]+)([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*\{')
+                # Pattern: C function declarations (not C++ code with ::, <, >, #)
+                pattern = re.compile(r'\b((?:unsigned\s+)?(?:long\s+)?(?:long\s+)?[a-zA-Z_]\w*[\s\*]+)([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*([{;])')
                 for match in pattern.finditer(stmt.code):
+                    full_match = match.group(0)
+                    # Skip C++ specific lines: ::, <, >, #
+                    if '::' in full_match or '<' in full_match or '>' in full_match or '#' in full_match:
+                        continue
+                    # Check context BEFORE match for C++ syntax (std::, <, etc.)
+                    context_start = max(0, match.start() - 10)
+                    context_before = stmt.code[context_start:match.start()]
+                    if '::' in context_before or '<' in context_before:
+                        continue
+                    # Skip if match starts inside a C++ comment (// or /*)
+                    line_start = stmt.code.rfind('\n', 0, match.start())
+                    if line_start == -1:
+                        line_start = 0
+                    else:
+                        line_start += 1
+                    line_before = stmt.code[line_start:match.start()]
+                    if '//' in line_before:
+                        continue
                     ret_type = match.group(1).strip()
                     func_name = match.group(2)
                     params_str = match.group(3).strip()

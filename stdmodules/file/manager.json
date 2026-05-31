@@ -1,0 +1,39 @@
+{
+    "name": "file",
+    "version": "1.0.0",
+    "stx": {
+        "processType": "module"
+    },
+    "output": {
+        "libmain": "src/file.ely",
+        "native": true,
+        "nativeSources": [
+            "src/file_native.c"
+        ],
+        "elyfile": [
+            "src/file.ely",
+            "elymodule.json"
+        ],
+        "externFunctions": [
+            {"name": "file_exists",      "returns": "bool", "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_read_all",    "returns": "str",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_write_all",   "returns": "int",  "params": [{"type": "str", "name": "path"}, {"type": "str", "name": "data"}]},
+            {"name": "file_remove",      "returns": "int",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_rename",      "returns": "int",  "params": [{"type": "str", "name": "old_path"}, {"type": "str", "name": "new_path"}]},
+            {"name": "file_size",        "returns": "more", "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_is_dir",      "returns": "bool", "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_is_file",     "returns": "bool", "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_mkdir",       "returns": "int",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_rmdir",       "returns": "int",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_read_text",   "returns": "str",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_write_text",  "returns": "int",  "params": [{"type": "str", "name": "path"}, {"type": "str", "name": "text"}]},
+            {"name": "file_list_dir",    "returns": "str",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_basename",    "returns": "str",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_dirname",     "returns": "str",  "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_is_absolute", "returns": "bool", "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_path_join",   "returns": "str",  "params": [{"type": "str", "name": "a"}, {"type": "str", "name": "b"}]},
+            {"name": "file_mtime",       "returns": "more", "params": [{"type": "str", "name": "path"}]},
+            {"name": "file_exists_int",  "returns": "int",  "params": [{"type": "str", "name": "path"}]}
+        ]
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "name": "json",
+    "version": "1.0.0",
+    "language_version": "26.5",
+    "stx": {
+        "processType": "module"
+    },
+    "description": "",
+    "author": "",
+    "linkfile": "link.ely",
+    "exports": [
+        "json_parse_str_wrapper",
+        "json_is_valid_wrapper",
+        "json_stringify"
+    ],
+    "include": [
+        "link.ely",
+        "elymodule.json",
+        "lib/json.lib",
+        "include/json.h",
+        "ely/json.ely",
+        "ely/elymodule.json"
+    ]
+}
