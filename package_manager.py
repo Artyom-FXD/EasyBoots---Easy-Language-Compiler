@@ -143,7 +143,13 @@ public int func hello() {
         return self._copy_and_register(src, module_name, meta)
 
     def _install_from_stdmodules(self, name: str) -> bool:
-        """Install a module from stdmodules/<name>/."""
+        """Install a module from stdmodules/<name>/.
+        
+        Copies pre-built artifacts from stdmodules/<name>/output/<name>/
+        (link.ely, lib/, include/, elymodule.json) into the project's
+        modules/ directory.  If the output/ is missing, the source is
+        compiled first via ebt.
+        """
         if not self.stdmodules_dir or not self.stdmodules_dir.is_dir():
             print(f"stdmodules directory not found.")
             print(f"Expected at: {self.stdmodules_dir}")
@@ -167,7 +173,49 @@ public int func hello() {
             meta = json.load(f)
 
         module_name = meta.get('name', name)
-        print(f"Installing {module_name}@{meta.get('version', '?')} from stdmodules/{name}")
+        version = meta.get('version', '?')
+        print(f"Installing {module_name}@{version} from stdmodules/{name}")
+
+        # --- Prefer pre-built output/<name>/ ---------------------------------
+        output_dir = src / 'output' / module_name
+        if output_dir.is_dir():
+            output_meta = output_dir / 'elymodule.json'
+            if output_meta.exists():
+                with open(output_meta, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                print(f"  Using pre-built artifacts from output/{module_name}/")
+                return self._copy_and_register(output_dir, module_name, meta)
+            else:
+                # Bare output — copy anyway but use root meta
+                print(f"  Using artifacts from output/{module_name}/")
+                return self._copy_and_register(output_dir, module_name, meta)
+
+        # --- Fallback: build from source then install ------------------------
+        manager_json = src / 'manager.json'
+        if manager_json.exists():
+            print(f"  Building module {module_name} from source ...")
+            ebt_path = Path(__file__).parent / 'ebt.py'
+            result = subprocess.run(
+                [sys.executable, str(ebt_path), 'build', str(manager_json)],
+                capture_output=True, text=True, cwd=str(src)
+            )
+            if result.returncode != 0:
+                print(f"  Build failed for {module_name}:")
+                print(f"  {result.stderr}")
+                return False
+            print(f"  Build succeeded.")
+            # Retry with output
+            output_dir = src / 'output' / module_name
+            if output_dir.is_dir():
+                print(f"  Using freshly built artifacts from output/{module_name}/")
+                return self._copy_and_register(output_dir, module_name, meta)
+            else:
+                print(f"  Output directory not found after build: {output_dir}")
+                print(f"  Falling back to source copy.")
+                return self._copy_and_register(src, module_name, meta)
+
+        # --- Last resort: copy the whole source module directory -------------
+        print(f"  No output/ and no manager.json — copying source directory.")
         return self._copy_and_register(src, module_name, meta)
 
     def _install_from_github(self, spec: str) -> bool:

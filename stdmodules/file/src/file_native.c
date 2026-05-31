@@ -18,7 +18,7 @@
 #include <limits.h>
 #endif
 
-#include "../../runtime/ely_runtime.h"
+#include "ely_runtime.h"
 
 /* ---------------- Extended Read / Write ---------------- */
 

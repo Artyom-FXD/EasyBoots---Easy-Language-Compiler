@@ -5,7 +5,7 @@
  * Uses Ely runtime functions (ely_dictify, ely_value_to_json, etc.) from ely_runtime.h.
  */
 #include <string.h>
-#include "../../runtime/ely_runtime.h"
+#include "ely_runtime.h"
 
 /* ---------------- Public API ---------------- */
 

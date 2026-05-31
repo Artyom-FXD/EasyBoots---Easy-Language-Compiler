@@ -2,7 +2,7 @@
 // language_version: 26.5
 // Do not edit manually.
 
-public extern str pathJoin(str a, str b);
-public extern str pathBasename(str p);
-public extern str pathDirname(str p);
-public extern bool pathIsAbsolute(str p);
+public str func pathJoin(str a, str b) {}
+public str func pathBasename(str p) {}
+public str func pathDirname(str p) {}
+public bool func pathIsAbsolute(str p) {}
