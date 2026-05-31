@@ -11,10 +11,43 @@ from lexer_module import Lexer
 from parser import *
 from codegen.codegen import CppCodeGen
 
+# ---------------------------------------------------------------------------
+# Terminal color and style constants (no emoji)
+# ---------------------------------------------------------------------------
+class TC:
+    """ANSI terminal color/style codes."""
+    RED    = '\033[91m'
+    GREEN  = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE   = '\033[94m'
+    CYAN   = '\033[96m'
+    WHITE  = '\033[97m'
+    BOLD   = '\033[1m'
+    DIM    = '\033[2m'
+    RESET  = '\033[0m'
+
+    @staticmethod
+    def tag(label: str) -> str:
+        """Return a coloured tag like [INFO], [OK], [ERROR], [WARN], [SKIP]."""
+        t = label.upper()
+        if t == 'INFO':
+            return f"{TC.BLUE}{TC.BOLD}[{t}]{TC.RESET}"
+        if t == 'OK':
+            return f"{TC.GREEN}{TC.BOLD}[{t}]{TC.RESET}"
+        if t == 'ERROR':
+            return f"{TC.RED}{TC.BOLD}[{t}]{TC.RESET}"
+        if t == 'WARN':
+            return f"{TC.YELLOW}{TC.BOLD}[{t}]{TC.RESET}"
+        if t == 'SKIP':
+            return f"{TC.DIM}[{t}]{TC.RESET}"
+        if t == 'BUILD':
+            return f"{TC.CYAN}{TC.BOLD}[{t}]{TC.RESET}"
+        return f"[{label}]"
+
 
 class ProjectBuilder:
     """
-    Orchestrates the end‑to‑end build pipeline for an Ely language project.
+    Orchestrates the end-to-end build pipeline for an Ely language project.
 
     Responsible for parsing source files, performing semantic analysis, generating C++ code,
     compiling runtime dependencies, and linking the final executable.
@@ -74,9 +107,9 @@ class ProjectBuilder:
         if not gxx.exists():
             try:
                 shutil.copy2(gcc_path, gxx)
-                print(f"Created {gxx.name} from {gcc_path.name}")
+                print(f"  {TC.tag('OK')} Created {gxx.name} from {gcc_path.name}")
             except OSError as e:
-                print(f"Warning: could not create {gxx.name} ({e}).")
+                print(f"  {TC.tag('WARN')} Could not create {gxx.name}: {e}")
                 return False
         return True
 
@@ -147,7 +180,8 @@ class ProjectBuilder:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Compilation of {src.name} failed:\n{e.stderr}")
+            print(f"\n{TC.tag('ERROR')} Runtime compilation failed: {src.name}")
+            self._show_compiler_error(e.stderr, str(src))
             return False
 
     def _file_hash(self, path: Path) -> str:
@@ -204,6 +238,31 @@ class ProjectBuilder:
             # Сверяем хэш исходника (если есть кэш)
         return True
 
+    # ------------------------------------------------------------------
+    # Project info display
+    # ------------------------------------------------------------------
+    def _print_project_info(self, sources: List[Path]):
+        """Print a coloured project information block before building."""
+        name = self.config.get('name', 'unknown')
+        out_cfg = self.config.get('output', {}).get('enter', {})
+        exe_name = out_cfg.get('name', 'a.out')
+        exe_type = out_cfg.get('type', 'exe')
+        entry = self.config.get('enter', '?')
+        modules = self.config.get('modules', {})
+
+        hdr = f"{TC.BOLD}{TC.WHITE}"
+        dim = f"{TC.DIM}"
+        rst = TC.RESET
+
+        print(f"\n{hdr}  Project: {name}{rst}")
+        print(f"  {dim}Entry point:{rst} {entry}")
+        print(f"  {dim}Source files:{rst} {len(sources)}")
+        print(f"  {dim}Output:{rst} {exe_name} ({exe_type})")
+        print(f"  {dim}Modules:{rst} {', '.join(modules.keys()) if modules else 'none'}")
+        print(f"  {dim}GC heap:{rst} {self.gc_young_mb} MiB young / {self.gc_old_mb} MiB old")
+        opt_str = {'none': 'off', 'soft': 'light (O1)', 'hard': 'full (O2)'}.get(self.optimization, self.optimization)
+        print(f"  {dim}Optimization:{rst} {opt_str}  {dim}Debug:{rst} {'on' if self.debug else 'off'}")
+
     def build(self) -> bool:
         """
         Execute the full build pipeline: parse, analyse, generate, compile, and link.
@@ -221,6 +280,9 @@ class ProjectBuilder:
         sources = self._collect_sources()
         if not sources:
             return False
+
+        # ----- Вывод информации о проекте -----
+        self._print_project_info(sources)
 
         # ===== 3. Проверка кэша (инкрементальная сборка) =====
         cache = self._load_cache()
@@ -253,16 +315,24 @@ class ProjectBuilder:
 
         # ===== 4. Парсинг + семантика + кодогенерация (только если нужно) =====
         if need_generate:
-            print("⏳ Changes detected, recompiling Ely sources...")
+            print(f"\n{TC.tag('BUILD')} Changes detected, recompiling Ely sources...")
             all_statements = []
+            # Собираем исходники с каждого файла, сразу выводим ошибки парсера
+            parser_errors_occurred = False
             for src in sources:
                 with open(src, 'r', encoding='utf-8') as f:
-                    lexer = Lexer(f.read())
+                    source_text = f.read()
+                lexer = Lexer(source_text)
                 parser = Parser(lexer)
                 prog = parser.parse()
                 if parser.errors:
-                    return False
-                all_statements.extend(prog.statements)
+                    parser_errors_occurred = True
+                    self._show_parser_errors(src, source_text, parser.errors)
+                if prog:
+                    all_statements.extend(prog.statements)
+            if parser_errors_occurred:
+                return False
+
             decls = []
             bodies = []
             for stmt in all_statements:
@@ -277,24 +347,29 @@ class ProjectBuilder:
             if errors:
                 self._show_semantic_errors(errors)
                 return False
-            print("✓ Analysis successful")
+            print(f"  {TC.tag('OK')} Semantic analysis passed")
 
             codegen = CppCodeGen(debug=self.debug)
             cpp_code = codegen.generate(Program(all_statements))
             cpp_file.write_text(cpp_code, encoding='utf-8')
+            print(f"  {TC.tag('OK')} C++ code generated -> {cpp_file.name}")
             need_recompile = True
             need_relink = True
         else:
-            print("⏭️ No source changes detected, skipping Ely compilation.")
+            print(f"\n{TC.tag('SKIP')} No source changes detected, skipping Ely compilation.")
 
         # ===== 5. Поиск компилятора C++ =====
+        print(f"\n{TC.tag('INFO')} Searching for C++ compiler...")
         compiler, comp_path, extra_flags = self._find_compiler()
         if not compiler:
-            print("No C++ compiler found. Please install MinGW (gcc/g++) or run 'ebt install-compiler'.")
+            print(f"\n{TC.tag('ERROR')} No C++ compiler found.")
+            print(f"  {TC.DIM}Please install MinGW (gcc/g++) or run 'ebt install-compiler'.{TC.RESET}")
             return False
+        print(f"  {TC.tag('OK')} Using {compiler} -> {comp_path}")
 
-        # ===== 6. Компиляция output.cpp → output.o =====
+        # ===== 6. Компиляция output.cpp -> output.o =====
         if need_recompile:
+            print(f"  {TC.tag('BUILD')} Compiling {cpp_file.name} -> {main_obj.name}...")
             cmd = [comp_path, '-c', str(cpp_file), '-o', str(main_obj)]
             if compiler == 'gcc':
                 cmd += ['-x', 'c++']
@@ -311,18 +386,23 @@ class ProjectBuilder:
                 cmd.extend(['-x', 'c++'])
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
+                print(f"    {TC.tag('OK')} Compilation succeeded")
             except subprocess.CalledProcessError as e:
-                print(f"Compilation of main project failed:\n{e.stderr}")
+                print(f"\n{TC.tag('ERROR')} C++ compilation failed")
+                self._show_compiler_error(e.stderr, str(cpp_file))
                 return False
         else:
-            print("⏭️ output.o is up to date, skipping compilation.")
+            print(f"  {TC.tag('SKIP')} output.o is up to date, skipping compilation.")
 
         # ===== 7. Компиляция runtime файлов (всегда проверяем актуальность) =====
+        print(f"\n{TC.tag('INFO')} Compiling runtime...")
         rt_obj = self.build_dir / 'runtime.o'
         if self.force_rebuild or not rt_obj.exists():
             if not self._compile_runtime(compiler, comp_path,
                                          self.build_dir / 'runtime' / 'ely_runtime.c', rt_obj):
                 return False
+        else:
+            print(f"  {TC.tag('SKIP')} ely_runtime.o up to date")
         gc_obj = self.build_dir / 'gc.o'
         if self.force_rebuild or not gc_obj.exists():
             if not self._compile_runtime(compiler, comp_path,
@@ -330,14 +410,19 @@ class ProjectBuilder:
                                          [f'GC_YOUNG_SIZE_MB={self.gc_young_mb}',
                                           f'GC_OLD_INITIAL_SIZE_MB={self.gc_old_mb}']):
                 return False
+        else:
+            print(f"  {TC.tag('SKIP')} ely_gc.o up to date")
         coll_obj = self.build_dir / 'collections.o'
         if self.force_rebuild or not coll_obj.exists():
             if not self._compile_runtime(compiler, comp_path,
                                          self.build_dir / 'runtime' / 'collections.c', coll_obj):
                 return False
+        else:
+            print(f"  {TC.tag('SKIP')} collections.o up to date")
 
         # ===== 8. Линковка =====
         if need_relink:
+            print(f"\n{TC.tag('BUILD')} Linking...")
             link_cmd = [comp_path, '-static', '-mconsole', '-o', str(output_exe),
                         str(main_obj), str(rt_obj), str(coll_obj), str(gc_obj)]
             if compiler in ('gcc', 'g++', 'c++'):
@@ -346,12 +431,14 @@ class ProjectBuilder:
                 link_cmd.append('-O2')
             try:
                 subprocess.run(link_cmd, check=True, capture_output=True, text=True)
-                print(f"✓ Executable created: {output_exe}")
+                print(f"\n  {TC.GREEN}{TC.BOLD}BUILD SUCCESS{TC.RESET}")
+                print(f"  {TC.BOLD}{TC.WHITE}Executable:{TC.RESET} {output_exe}")
             except subprocess.CalledProcessError as e:
-                print(f"Linking failed:\n{e.stderr}")
+                print(f"\n{TC.tag('ERROR')} Linking failed")
+                self._show_compiler_error(e.stderr, str(output_exe))
                 return False
         else:
-            print(f"⏭️ {output_exe} is up to date, skipping link.")
+            print(f"\n  {TC.tag('SKIP')} {output_exe.name} is up to date, skipping link.")
 
         # ===== 9. Сохраняем кэш =====
         self._save_cache(cache)
@@ -374,7 +461,7 @@ class ProjectBuilder:
                 shutil.rmtree(self.build_runtime)
             shutil.copytree(self.compiler_runtime, self.build_runtime)
             return True
-        print("Error: runtime directory not found.")
+        print(f"\n{TC.tag('ERROR')} Runtime directory not found at {self.compiler_runtime}")
         return False
 
     def _collect_sources(self) -> list:
@@ -390,11 +477,11 @@ class ProjectBuilder:
         """
         main_file = self.config.get('enter')
         if not main_file:
-            print("Error: 'enter' not specified in manager.json")
+            print(f"\n{TC.tag('ERROR')} 'enter' not specified in manager.json")
             return []
         main_path = (self.project_root / main_file).resolve()
         if not main_path.exists() or not main_path.is_file():
-            print(f"Error: main file not found: {main_path}")
+            print(f"\n{TC.tag('ERROR')} Main file not found: {main_path}")
             return []
 
         collected = {}
@@ -415,7 +502,7 @@ class ProjectBuilder:
             prog = parser.parse()
             if parser.errors:
                 for err in parser.errors:
-                    print(err)
+                    print(f"{TC.YELLOW}{TC.BOLD}  {err}{TC.RESET}")
                 return []
 
             for stmt in prog.statements:
@@ -428,26 +515,76 @@ class ProjectBuilder:
                         if module in modules_config:
                             module = modules_config[module]
                         else:
-                            print(f"Warning: module '{module}' not found in manager.json")
+                            print(f"  {TC.tag('WARN')} Module '{module}' not found in manager.json")
                             continue
                     candidate = (abs_path.parent / module).resolve()
                     if candidate.exists():
                         pending.append(candidate)
                     else:
-                        print(f"Warning: module file not found: {candidate}")
+                        print(f"  {TC.tag('WARN')} Module file not found: {candidate}")
 
         return list(collected.keys())
 
+    # ------------------------------------------------------------------
+    # Error display helpers
+    # ------------------------------------------------------------------
     def _show_semantic_errors(self, errors):
-        """
-        Print semantic analysis errors to the console in a formatted style.
+        """Print semantic analysis errors with coloured, structured output."""
+        total = len(errors)
+        print(f"\n{TC.tag('ERROR')} {TC.BOLD}{TC.RED}Semantic errors ({total}):{TC.RESET}")
+        for i, e in enumerate(errors, 1):
+            msg = str(e)
+            # Try to parse "file:line:col: message" format
+            if ':' in msg:
+                print(f"\n  {TC.DIM}{i}/{total}{TC.RESET} {TC.YELLOW}{TC.BOLD}{msg}{TC.RESET}")
+            else:
+                print(f"  {TC.DIM}{i}/{total}{TC.RESET} {TC.YELLOW}{msg}{TC.RESET}")
+        print()
 
-        :param errors: A list of error message strings.
+    def _show_parser_errors(self, src_path: Path, source_text: str, errors: list):
+        """Print parser errors with source context, line numbers, and carets."""
+        lines = source_text.split('\n')
+        src_display = str(src_path)
+        total = len(errors)
+        print(f"\n{TC.tag('ERROR')} {TC.BOLD}{TC.RED}Parser errors ({total}) in {src_display}:{TC.RESET}")
 
-        Выводит ошибки семантического анализа в консоль в форматированном виде.
-        :param errors: Список строк с сообщениями об ошибках.
-        """
-        RED, BOLD, RESET = '\033[91m', '\033[1m', '\033[0m'
-        print(f"{BOLD}{RED}Semantic errors:{RESET}")
-        for e in errors:
-            print(f"  {e}")
+        for i, err in enumerate(errors, 1):
+            err_str = str(err)
+            line = getattr(err, 'line', None)
+            col = getattr(err, 'col', None)
+
+            print(f"\n  {TC.DIM}--- error {i}/{total}{TC.RESET}")
+
+            if line is not None and 1 <= line <= len(lines):
+                source_line = lines[line - 1]
+                if col is not None and col > 0:
+                    print(f"  {TC.DIM}{src_display}:{line}:{col}{TC.RESET}")
+                    print(f"  {TC.DIM}{line:>4} |{TC.RESET}")
+                    print(f"  {TC.DIM}{'':>4} |{TC.RESET} {source_line}")
+                    pointer = ' ' * col + f"{TC.RED}{TC.BOLD}^--- {err_str}{TC.RESET}"
+                    print(f"  {TC.DIM}{'':>4} |{TC.RESET} {pointer}")
+                else:
+                    print(f"  {TC.DIM}{src_display}:{line}{TC.RESET}")
+                    print(f"  {TC.DIM}{line:>4} |{TC.RESET}")
+                    print(f"  {TC.DIM}{'':>4} |{TC.RESET} {source_line}")
+                    print(f"  {TC.DIM}{'':>4} |{TC.RESET} {TC.RED}{TC.BOLD}^--- {err_str}{TC.RESET}")
+            else:
+                # No line/col info — just print the message
+                print(f"  {TC.DIM}{src_display}{TC.RESET}")
+                print(f"  {TC.RED}{TC.BOLD}{err_str}{TC.RESET}")
+        print()
+
+    @staticmethod
+    def _show_compiler_error(stderr_text: str, context_hint: str = ''):
+        """Print C/C++ compiler/linker errors with highlighted keywords."""
+        # Keywords to highlight
+        keywords = ['error:', 'Error:', 'ERROR:', 'undefined reference',
+                    'collect2:', 'ld returned']
+        for line in stderr_text.strip().split('\n'):
+            stripped = line.strip()
+            if any(kw in stripped for kw in keywords):
+                print(f"  {TC.RED}{TC.BOLD}{stripped}{TC.RESET}")
+            elif stripped.startswith(('In file', 'from', 'note:')):
+                print(f"  {TC.DIM}{stripped}{TC.RESET}")
+            else:
+                print(f"  {TC.YELLOW}{stripped}{TC.RESET}")
